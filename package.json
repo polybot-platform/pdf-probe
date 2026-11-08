@@ -1,0 +1,14 @@
+{
+  "name": "pdf-probe-tools",
+  "private": true,
+  "type": "module",
+  "description": "Test corpus generators and the differential test against pdf.js. Not the library.",
+  "scripts": {
+    "corpus": "bun run corpus/generate-classic.ts corpus/out && bun run corpus/generate-modern.ts corpus/out",
+    "reference": "bun run tools/run-reference.ts corpus/out corpus/reference-results.json",
+    "diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json"
+  },
+  "devDependencies": {
+    "unpdf": "2.1.0"
+  }
+}

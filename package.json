@@ -6,7 +6,8 @@
   "scripts": {
     "corpus": "bun run corpus/generate-classic.ts corpus/out && bun run corpus/generate-modern.ts corpus/out",
     "reference": "bun run tools/run-reference.ts corpus/out corpus/reference-results.json",
-    "diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json"
+    "diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json",
+    "poppler": "bun run tools/run-poppler.ts corpus/out corpus/poppler-results.json"
   },
   "devDependencies": {
     "unpdf": "2.1.0"

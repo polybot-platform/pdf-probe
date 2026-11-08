@@ -7,6 +7,8 @@ bun install
 bun run corpus      # writes corpus/out/*.pdf (needs Ghostscript `gs` on the PATH for the gs-* cases)
 bun run reference   # runs pdf.js over them -> corpus/reference-results.json
 bun run diff corpus/reference-results.json   # compares a results file with corpus/expected-pdfjs.json
+bun run poppler     # runs poppler's pdfinfo over them -> corpus/poppler-results.json (needs poppler-utils)
+bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/poppler-results.json
 ```
 
 `bun run diff` exits non-zero on any unexpected difference. Run on pdf.js's own results it reports one `STALE intended difference` (`empty-page-tree.pdf`), because pdf.js by definition does not make the intended change. That is the expected self-check output.
@@ -29,6 +31,19 @@ The gate is "identical to pdf.js" except for the fixtures listed, with reasons, 
 | `empty-page-tree.pdf` | readable, 0 pages | failure, kind `empty` | A document with no pages has nothing to count; a caller checking `pages <= cap` would let it through. Its own kind, not `unparseable`: the file is well-formed, just empty |
 
 Deliberately **not** differences, because the library matches pdf.js: trusting `/Count` (`count-undercounts.pdf`, `count-overcounts.pdf`), failing on a page-tree cycle, failing on a user password, and failing on a missing or truncated cross-reference table. Gemini follows `/Count` too, so a stricter count would reject files the model accepts.
+
+## poppler as a third opinion
+
+`bun run poppler` runs `pdfinfo` (poppler 24.02.0) over the corpus in the same results shape. It reports what poppler says and does not try to agree with pdf.js. Against `expected-pdfjs.json`, 53 of 59 fixtures are identical. The six that differ:
+
+| Fixture | pdf.js | poppler `pdfinfo` | What it tells us |
+|---|---|---|---|
+| `userunit-0.5.pdf`, `userunit-2-oversize.pdf`, `xrefstm-objstm-rotate-userunit.pdf` | `/UserUnit` applied | `/UserUnit` ignored | A limit of `pdfinfo`, which prints the box size only. Poppler gives no opinion on `/UserUnit` |
+| `page-tree-cycle.pdf` | fails (`unparseable`) | logs `Loop in Pages tree`, exits 0, reports 2 pages with the second `0 x 0` | `pdfinfo` does not fail closed on a cycle. The runner keeps the log line in a `note` field. Earlier notes saying poppler "detects the loop" meant this log line only |
+| `count-overcounts.pdf` (`/Count 500`, one page) | 1 page | fails: `Page count (500) larger than number of objects (4)` | A real disagreement. Poppler is stricter than pdf.js on an over-count. What Gemini does with an over-count was not tested, so the library follows pdf.js until it is |
+| `empty-page-tree.pdf` | readable, 0 pages | fails: `Invalid page count 0` | Agrees with the intended difference. Poppler cannot say `empty`, so the runner reports `unparseable` |
+
+Use poppler to break a tie between the library and pdf.js on fixtures other than `/UserUnit`. On `/UserUnit` it is silent, and on a cycle read its `note` rather than the verdict.
 
 ## Known caveats
 

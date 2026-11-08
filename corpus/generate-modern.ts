@@ -239,7 +239,10 @@ w('xrefstm-objstm-rotate-userunit.pdf', modern({ pages: [{ box: '/MediaBox [0 0 
   const xsOff = xrefStream(o, 5, [[2, 2, 4, 0], [3, 2, 4, 1], [4, 1, osOff, 0]], '/Root 1 0 R', false)
   const xr = o.len
   const f = (v: number): string => `${String(v).padStart(10, '0')} 00000 n \n`
-  o.put(`xref\n0 6\n0000000000 65535 f \n${f(catOff)}0000000000 00000 f \n0000000000 00000 f \n${f(osOff)}${f(xsOff)}`)
+  // Objects 2 and 3 live in the object stream and are described only by the /XRefStm. They are left out of
+  // the table's subsections rather than marked free: pdf.js and poppler stop at a free entry and never
+  // fall through to the stream.
+  o.put(`xref\n0 2\n0000000000 65535 f \n${f(catOff)}4 2\n${f(osOff)}${f(xsOff)}`)
   o.put(`trailer\n<< /Size 6 /Root 1 0 R /XRefStm ${xsOff} >>\nstartxref\n${xr}\n%%EOF\n`)
   w('hybrid-reference-oversize.pdf', o.done())
 }

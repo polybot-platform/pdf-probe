@@ -1425,8 +1425,14 @@
   "err": "Invalid PDF structure."
  },
  "hybrid-reference-oversize.pdf": {
-  "verdict": "unparseable",
-  "err": "Invalid Root reference."
+  "verdict": "pageSize",
+  "pages": 1,
+  "sizes": [
+   [
+    1700,
+    2400
+   ]
+  ]
  },
  "incremental-page-added-oversize.pdf": {
   "verdict": "pageSize",

@@ -30,11 +30,9 @@ The gate is "identical to pdf.js" except for the fixtures listed, with reasons, 
 
 Deliberately **not** differences, because the library matches pdf.js: trusting `/Count` (`count-undercounts.pdf`, `count-overcounts.pdf`), failing on a page-tree cycle, failing on a user password, and failing on a missing or truncated cross-reference table. Gemini follows `/Count` too, so a stricter count would reject files the model accepts.
 
-Not yet decided: `hybrid-reference-oversize.pdf` (see below) stays out of the list until the fixture is fixed or dropped, since a malformed fixture says nothing about intended behaviour.
-
 ## Known caveats
 
-- `hybrid-reference-oversize.pdf` is probably malformed: pdf.js and poppler's `pdfinfo` both reject it, while lopdf reads it. Fix or drop it before treating it as evidence about any reader.
+- `hybrid-reference-oversize.pdf` was malformed in the first version (the classic table marked the compressed objects free, so pdf.js and poppler never reached the `/XRefStm`). It now omits them from the table's subsections, and pdf.js and poppler agree: 1 page, 1700 x 2400 pt.
 - The encrypted fixtures use random keys and IDs, so their bytes differ on every run. The results do not.
 - `expected-pdfjs.json` records pdf.js's behaviour, not the truth. Where pdf.js and poppler disagree with what a reader should do, say so in the differential test as an intended difference.
 - `count-undercounts.pdf` (a tree of 5 pages with `/Count 2`) reads as 2 pages in pdf.js and poppler. That is the behaviour to match.

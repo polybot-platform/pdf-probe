@@ -1,7 +1,9 @@
 {
   "empty-page-tree.pdf": {
-    "expected": { "verdict": "unparseable" },
+    "expected": {
+      "verdict": "empty"
+    },
     "pdfjs": "readable, 0 pages",
-    "reason": "A document with no pages has nothing to count or size. pdf.js reports 0 pages, and a caller that only checks 'pages <= cap' lets it through. The library fails closed instead. Whether to call this failure 'unparseable' or give it its own kind is still open; the test compares only the failure, not its kind or message."
+    "reason": "A document with no pages has nothing to count or size. pdf.js reports 0 pages and a caller that only checks 'pages <= cap' lets it through. The library fails closed with its own kind, 'empty', separate from 'unparseable': the file is well-formed but has no pages, and a caller may want to tell a damaged upload from an empty one. A wrapper with a fixed set of kinds (such as chatbot-agent's 'pages' | 'pageSize' | 'unparseable' | null) maps 'empty' to 'unparseable'. The test compares the kind, not the message."
   }
 }

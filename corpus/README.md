@@ -11,7 +11,7 @@ bun run diff corpus/reference-results.json   # compares a results file with corp
 
 `bun run diff` exits non-zero on any unexpected difference. Run on pdf.js's own results it reports one `STALE intended difference` (`empty-page-tree.pdf`), because pdf.js by definition does not make the intended change. That is the expected self-check output.
 
-`expected-pdfjs.json` is what pdf.js 6.4.299 (through unpdf 2.1.0) returns for each file: the page count, every page's size in points, and a verdict (`null` readable, `pageSize` for a page over 17.5 x 12 inches, `unparseable`). The size limit is an example policy for the test, not part of the library. A candidate's results file has the same shape.
+`expected-pdfjs.json` is what pdf.js 6.4.299 (through unpdf 2.1.0) returns for each file: the page count, every page's size in points, and a verdict (`null` readable, `pageSize` for a page over 17.5 x 12 inches, `unparseable`; a candidate may also return `empty`, see Intended differences). The size limit is an example policy for the test, not part of the library. A candidate's results file has the same shape.
 
 ## What is covered
 
@@ -26,7 +26,7 @@ The gate is "identical to pdf.js" except for the fixtures listed, with reasons, 
 
 | Fixture | pdf.js | pdf-probe | Why |
 |---|---|---|---|
-| `empty-page-tree.pdf` | readable, 0 pages | failure | A document with no pages has nothing to count; a caller checking `pages <= cap` would let it through |
+| `empty-page-tree.pdf` | readable, 0 pages | failure, kind `empty` | A document with no pages has nothing to count; a caller checking `pages <= cap` would let it through. Its own kind, not `unparseable`: the file is well-formed, just empty |
 
 Deliberately **not** differences, because the library matches pdf.js: trusting `/Count` (`count-undercounts.pdf`, `count-overcounts.pdf`), failing on a page-tree cycle, failing on a user password, and failing on a missing or truncated cross-reference table. Gemini follows `/Count` too, so a stricter count would reject files the model accepts.
 

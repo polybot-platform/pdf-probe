@@ -5,8 +5,10 @@ const [baseF, candF, intendedF = new URL('../corpus/intended-differences.json', 
 const base = await Bun.file(baseF).json(), cand = await Bun.file(candF).json()
 const intended = (await Bun.file(intendedF).exists()) ? await Bun.file(intendedF).json() : {}
 type R = { verdict: string | null; pages?: number; sizes?: number[][]; err?: string }
+// Failure kinds carry no page data and no message to compare: the verdict alone must match.
+const FAILURES = new Set(['unparseable', 'empty'])
 const same = (b: R, c: R) =>
-  b.verdict === c.verdict && (b.verdict === 'unparseable' || (b.pages === c.pages && JSON.stringify(b.sizes) === JSON.stringify(c.sizes)))
+  b.verdict === c.verdict && (FAILURES.has(b.verdict as string) || (b.pages === c.pages && JSON.stringify(b.sizes) === JSON.stringify(c.sizes)))
 let ok = 0, allowed = 0; const diffs: string[] = []
 for (const f of Object.keys(base)) {
   const b: R = base[f], c: R = cand[f] ?? { verdict: 'MISSING' }

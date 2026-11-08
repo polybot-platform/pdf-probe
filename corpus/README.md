@@ -9,6 +9,8 @@ bun run reference   # runs pdf.js over them -> corpus/reference-results.json
 bun run diff corpus/reference-results.json   # compares a results file with corpus/expected-pdfjs.json
 ```
 
+`bun run diff` exits non-zero on any unexpected difference. Run on pdf.js's own results it reports one `STALE intended difference` (`empty-page-tree.pdf`), because pdf.js by definition does not make the intended change. That is the expected self-check output.
+
 `expected-pdfjs.json` is what pdf.js 6.4.299 (through unpdf 2.1.0) returns for each file: the page count, every page's size in points, and a verdict (`null` readable, `pageSize` for a page over 17.5 x 12 inches, `unparseable`). The size limit is an example policy for the test, not part of the library. A candidate's results file has the same shape.
 
 ## What is covered
@@ -17,6 +19,18 @@ bun run diff corpus/reference-results.json   # compares a results file with corp
 |---|---|
 | `generate-classic.ts` | Classic xref; inherited and indirect MediaBox; CropBox smaller and larger; `/Rotate` (90, 270, negative, 45, inherited); `/UserUnit`; reversed and zero-area boxes; nested trees; `/Count` over and under; page-tree cycle; kid without `/Type`; empty tree; broken offsets, `startxref` and missing xref; truncation; trailing junk; garbage header; incremental update that removes a page and one that adds an oversize page; non-PDFs; Ghostscript output (classic, linearized, RC4) |
 | `generate-modern.ts` | Xref streams and object streams (the page tree exists only inside compressed data); Flate with PNG predictors; incremental updates over xref streams; a hybrid-reference file; RC4-128, AES-128 and AES-256 (R6) encryption with an empty user password, with the page tree inside an encrypted object stream; the same three with a user password set (must fail) |
+
+## Intended differences
+
+The gate is "identical to pdf.js" except for the fixtures listed, with reasons, in [`intended-differences.json`](intended-differences.json). A listed fixture must match its listed expectation and must differ from pdf.js; if a candidate starts matching pdf.js again, the entry is reported as stale. Every other difference fails.
+
+| Fixture | pdf.js | pdf-probe | Why |
+|---|---|---|---|
+| `empty-page-tree.pdf` | readable, 0 pages | failure | A document with no pages has nothing to count; a caller checking `pages <= cap` would let it through |
+
+Deliberately **not** differences, because the library matches pdf.js: trusting `/Count` (`count-undercounts.pdf`, `count-overcounts.pdf`), failing on a page-tree cycle, failing on a user password, and failing on a missing or truncated cross-reference table. Gemini follows `/Count` too, so a stricter count would reject files the model accepts.
+
+Not yet decided: `hybrid-reference-oversize.pdf` (see below) stays out of the list until the fixture is fixed or dropped, since a malformed fixture says nothing about intended behaviour.
 
 ## Known caveats
 

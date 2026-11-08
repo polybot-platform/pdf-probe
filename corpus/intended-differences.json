@@ -1,0 +1,7 @@
+{
+  "empty-page-tree.pdf": {
+    "expected": { "verdict": "unparseable" },
+    "pdfjs": "readable, 0 pages",
+    "reason": "A document with no pages has nothing to count or size. pdf.js reports 0 pages, and a caller that only checks 'pages <= cap' lets it through. The library fails closed instead. Whether to call this failure 'unparseable' or give it its own kind is still open; the test compares only the failure, not its kind or message."
+  }
+}

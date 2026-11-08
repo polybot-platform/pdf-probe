@@ -3,3 +3,4 @@ corpus/out/
 corpus/reference-results.json
 target/
 corpus/poppler-results.json
+corpus/pdfjs-samples/

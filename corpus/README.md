@@ -9,6 +9,7 @@ bun run reference   # runs pdf.js over them -> corpus/reference-results.json
 bun run diff corpus/reference-results.json   # compares a results file with corpus/expected-pdfjs.json
 bun run poppler     # runs poppler's pdfinfo over them -> corpus/poppler-results.json (needs poppler-utils)
 bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/poppler-results.json
+bun run samples && bun run samples:reference && bun run samples:poppler && bun run samples:diff   # pdf.js's own test PDFs, see below
 ```
 
 `bun run diff` exits non-zero on any unexpected difference. Run on pdf.js's own results it reports one `STALE intended difference` (`empty-page-tree.pdf`), because pdf.js by definition does not make the intended change. That is the expected self-check output.
@@ -44,6 +45,22 @@ Deliberately **not** differences, because the library matches pdf.js: trusting `
 | `empty-page-tree.pdf` | readable, 0 pages | fails: `Invalid page count 0` | Agrees with the intended difference. Poppler cannot say `empty`, so the runner reports `unparseable` |
 
 Use poppler to break a tie between the library and pdf.js on fixtures other than `/UserUnit`. On `/UserUnit` it is silent, and on a cycle read its `note` rather than the verdict.
+
+## pdf.js's own test PDFs
+
+`bun run samples` fetches the 987 PDFs committed under `test/pdfs` in pdf.js v6.4.299 (commit `d0991a0`, 121 MB) into `corpus/pdfjs-samples/`, which is git-ignored. They are **not** copied into this repository: the files carry no per-file licence or provenance, and some came from third-party bug reports, so we cannot say they are free of personal data or that we may redistribute them. The fetch is pinned and checked against the commit hash. Run the tools over them; do not commit or republish them.
+
+`bun run samples:reference` and `bun run samples:poppler` write results in the usual shape, and `bun run samples:diff` compares them. The expected values are whatever pdf.js returns on that checkout, so nothing about these files is stored here.
+
+pdf.js and poppler agree on 962 of the 987. The 25 that differ, grouped by what happened (causes are not triaged yet):
+
+| Group | Files |
+|---|---|
+| poppler fails, pdf.js reads (11) | `Brotli-Prototype-FileA` (poppler has no Brotli filter), `bug1978317`, `bug1980958`, `issue15590`, `issue18986`, `issue9105_other`, `issue9418`, `poppler-67295-0` (huge `/Count`), `poppler-85140-0`, `poppler-91414-0-53`, `poppler-91414-0-54` |
+| pdf.js fails, poppler reads (7) | `Pages-tree-refs`, `bug1782186`, `encrypted-attachment`, `issue15893_reduced`, `poppler-742-0-fuzzed`, `poppler-937-0-fuzzed`, `pr6531_2` |
+| both read it, page sizes differ (7) | `boundingBox_invalid`, `bug1947248_forms`, `bug1947248_text`, `issue19176`, `issue19484_1`, `issue19484_2`, `issue9949` |
+
+These are the files where the library's behaviour has to be decided, because "match pdf.js" is only the answer when pdf.js is right. Triage each before the parser exists, and move any intended difference into `intended-differences.json`.
 
 ## Known caveats
 

@@ -52,15 +52,7 @@ Use poppler to break a tie between the library and pdf.js on fixtures other than
 
 `bun run samples:reference` and `bun run samples:poppler` write results in the usual shape, and `bun run samples:diff` compares them. The expected values are whatever pdf.js returns on that checkout, so nothing about these files is stored here.
 
-pdf.js and poppler agree on 962 of the 987. The 25 that differ, grouped by what happened (causes are not triaged yet):
-
-| Group | Files |
-|---|---|
-| poppler fails, pdf.js reads (11) | `Brotli-Prototype-FileA` (poppler has no Brotli filter), `bug1978317`, `bug1980958`, `issue15590`, `issue18986`, `issue9105_other`, `issue9418`, `poppler-67295-0` (huge `/Count`), `poppler-85140-0`, `poppler-91414-0-53`, `poppler-91414-0-54` |
-| pdf.js fails, poppler reads (7) | `Pages-tree-refs`, `bug1782186`, `encrypted-attachment`, `issue15893_reduced`, `poppler-742-0-fuzzed`, `poppler-937-0-fuzzed`, `pr6531_2` |
-| both read it, page sizes differ (7) | `boundingBox_invalid`, `bug1947248_forms`, `bug1947248_text`, `issue19176`, `issue19484_1`, `issue19484_2`, `issue9949` |
-
-These are the files where the library's behaviour has to be decided, because "match pdf.js" is only the answer when pdf.js is right. Triage each before the parser exists, and move any intended difference into `intended-differences.json`.
+pdf.js and poppler agree on 962 of the 987. The 25 that differ are triaged in [`triage-pdfjs-samples.md`](triage-pdfjs-samples.md): 23 stay "match pdf.js" and 2 are intended differences (`Brotli-Prototype-FileA.pdf` and `poppler-85140-0.pdf`, in `intended-differences.json`). The seven files that pdf.js rejects and poppler reads all stay failures. Two fixtures are still to write: RC4 with a short key under V4, and a hybrid file shaped like `issue9418`.
 
 ## Known caveats
 

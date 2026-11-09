@@ -1,6 +1,6 @@
 # How pdf-probe gets the page count and page sizes
 
-> **This is the full design; the code covers part of it.** The first slice implements steps 3 (without encryption), 4 (without object streams), 5 and 6, and steps 1 and 2 for classic cross-reference tables only. Xref streams, object streams, Flate, encryption, hybrid files and the recovery scan are not written yet. Each step below is what the library must do to match pdf.js on the [corpus](../corpus/README.md); the rules come from pdf.js's behaviour, the PDF specification, and the findings in [`corpus/triage-pdfjs-samples.md`](../corpus/triage-pdfjs-samples.md).
+> **This is the full design; the code covers most of it.** Implemented: steps 1 and 2 for classic tables, cross-reference streams and hybrid files; step 4 including object streams, Flate and PNG predictors; steps 5 and 6. Not written yet: the recovery scan, and the encryption branch of step 3. A file that needs either is refused. Each step below is what the library must do to match pdf.js on the [corpus](../corpus/README.md); the rules come from pdf.js's behaviour, the PDF specification, and the findings in [`corpus/triage-pdfjs-samples.md`](../corpus/triage-pdfjs-samples.md).
 
 The library reads only what it needs: the end of the file, the cross-reference data, the catalog, the page tree and the page dictionaries. It does not touch content streams, fonts or images, and it does not read every object in the file.
 

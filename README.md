@@ -2,7 +2,7 @@
 
 A small, fail-closed reader that answers two questions about an untrusted PDF: **how many pages does it have, and how big is each page?** It does not render, extract text, decode images or edit anything.
 
-> **Status: second thin slice. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, the page tree and page sizes. Encryption and the recovery scan for damaged files are not written yet, and a file that needs either is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 942, differs on 2 by design, refuses 43, and **gives a different answer on none**. See [the status table](#status) below.
+> **Status: third thin slice. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes. Only the recovery scan for damaged files is not written yet, and a file that needs it is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 955, differs on 2 by design, refuses 30, and **gives a different answer on none**. See [the status table](#status) below.
 
 ```
 cargo test                      # unit tests
@@ -12,16 +12,16 @@ bun run slice && bun run slice:diff   # run the crate over it and compare with p
 
 ## Status
 
-Measured on 2026-11-08 against pdf.js 6.4.299 (about 1,750 lines of Rust including tests, no dependencies, no `unsafe`, with its own inflate decoder):
+Measured on 2026-11-08 against pdf.js 6.4.299 (about 2,900 lines of Rust including tests and 130 lines of generated constant tables; no dependencies, no `unsafe`; its own inflate, MD5, SHA-2, AES and RC4):
 
 | Corpus | Same as pdf.js | Intended difference | Refused (fail closed) | Different answer |
 |---|---|---|---|---|
-| 68 synthetic fixtures | 52 | 1 (`empty-page-tree.pdf`) | 15 | 0 |
-| 987 pdf.js test PDFs | 942 | 2 (Brotli, unparseable page object) | 43 | 0 |
+| 68 synthetic fixtures | 63 | 1 (`empty-page-tree.pdf`) | 4 | 0 |
+| 987 pdf.js test PDFs | 955 | 2 (Brotli, unparseable page object) | 30 | 0 |
 
-The refusals are the features not written yet: encryption (12 synthetic, 14 real) and the recovery scan for damaged files, plus a few odd files (a missing `startxref`, an unreadable cross-reference, a truncated Flate stream).
+The refusals are damaged files, which need the recovery scan: a broken `startxref` or offset, a header that shifts every offset, trailing junk past the last kilobyte, an unreadable cross-reference, a truncated Flate stream. All 11 files that pdf.js rejects for a password are rejected here too.
 
-Speed and memory, native build, on the 925 real files that both readers answer identically (118 MB): pdf.js 463 ms warm (570 ms first run), pdf-probe 59 ms warm, about 8 times faster. On 20 of those files: pdf.js 7.6 ms warm and 78 ms first run, pdf-probe 0.5 ms and 0.7 ms. Peak RSS for the whole process on those 20 files (2.4 MB of input): Bun reading the files 20 MB, Bun plus pdf.js 66 to 68 MB, the pdf-probe binary 4.4 MB. These are a standalone binary, not `bun:ffi`, and not at idle in a container; treat them as an ordering, not a result. They also exclude the files each reader refuses, which are the harder ones.
+Speed and memory, native build, on the 938 real files that both readers answer identically (119 MB): pdf.js 550 ms warm (712 ms first run), pdf-probe 92 ms warm, about 6 times faster. On 20 of those files: pdf.js 8.9 ms warm and 69 ms first run, pdf-probe 1.1 ms and 1.2 ms. Peak RSS for the whole process on those 20 files (4.3 MB of input): Bun reading the files 22 MB, Bun plus pdf.js 71 to 73 MB, the pdf-probe binary 6.2 MB. Per encrypted file: RC4 0.06 ms against 0.57 ms in pdf.js, AES-128 0.08 against 0.83, AES-256 revision 6 9.4 against 23.5 (the revision 6 hash is an iterated key derivation, slow by design). These are a standalone binary, not `bun:ffi`, and not at idle in a container; treat them as an ordering, not a result. They also exclude the files each reader refuses, which are the harder ones.
 
 ## Why
 

@@ -34,6 +34,9 @@ pub(crate) fn decode(dict: &Dict, raw: &[u8], max_out: usize) -> Res<Vec<u8>> {
     };
     let mut data: Cow<[u8]> = Cow::Borrowed(raw);
     for (i, name) in filters.iter().enumerate() {
+        if *name == b"Crypt" {
+            continue; // handled by the security handler before decoding
+        }
         if *name != b"FlateDecode" && *name != b"Fl" {
             return Err("unsupported filter");
         }

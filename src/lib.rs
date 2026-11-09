@@ -6,12 +6,15 @@
 //! for the full design.
 #![forbid(unsafe_code)]
 
+mod crypto;
+mod encrypt;
 mod inflate;
 mod lexer;
 mod pages;
 mod stream;
 mod xref;
 
+use encrypt::Crypto;
 use lexer::{Lexer, Obj};
 use std::collections::HashMap;
 use xref::{Entry, Xref};
@@ -79,6 +82,7 @@ pub(crate) struct Doc<'a> {
     fetched: usize,
     decoded: usize,
     objstms: HashMap<u32, ObjStm>,
+    crypto: Option<Crypto>,
 }
 
 impl Doc<'_> {
@@ -106,7 +110,7 @@ impl Doc<'_> {
                     return Err(Failure::Unparseable("object offset past the end"));
                 };
                 match Lexer::new(self.data, offset).parse_indirect() {
-                    Some((n, obj)) if n == num => Ok(obj),
+                    Some((n, _, obj)) if n == num => Ok(obj),
                     Some(_) => Err(Failure::Unparseable("object number mismatch")),
                     None => Err(Failure::Unparseable("unreadable object")),
                 }
@@ -179,8 +183,12 @@ impl Doc<'_> {
             return Err(Failure::Unparseable("too many objects in an object stream"));
         }
         let remaining = self.limits.max_decompressed.saturating_sub(self.decoded);
-        let bytes =
-            stream::decode(&dict, &self.data[range], remaining).map_err(Failure::Unparseable)?;
+        let raw = &self.data[range];
+        let raw = match &self.crypto {
+            Some(crypto) => crypto.decrypt_stream(stream, ind.gen_, &dict, raw)?,
+            None => std::borrow::Cow::Borrowed(raw),
+        };
+        let bytes = stream::decode(&dict, &raw, remaining).map_err(Failure::Unparseable)?;
         self.decoded += bytes.len();
         let mut lx = Lexer::new(&bytes, 0);
         let mut index = Vec::new();
@@ -224,7 +232,9 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
         fetched: 0,
         decoded,
         objstms: HashMap::new(),
+        crypto: None,
     };
+    doc.crypto = encrypt::setup(&mut doc)?;
     let (sizes, count) = pages::collect(&mut doc, limits.max_pages)?;
     if sizes.len() > limits.max_pages {
         return Err(Failure::TooManyPages {

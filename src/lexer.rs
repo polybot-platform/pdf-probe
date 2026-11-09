@@ -60,6 +60,7 @@ fn is_delim(b: u8) -> bool {
 /// An indirect object, with the location of its stream data if it has one.
 pub(crate) struct Indirect {
     pub num: u32,
+    pub gen_: u16,
     pub obj: Obj,
     pub stream: Option<std::ops::Range<usize>>,
 }
@@ -327,14 +328,19 @@ impl<'a> Lexer<'a> {
 
     /// Like [`parse_indirect`](Self::parse_indirect), but also locates the data of a stream object.
     pub fn parse_indirect_full(&mut self) -> Option<Indirect> {
-        let (num, obj) = self.parse_indirect()?;
+        let (num, gen_, obj) = self.parse_indirect()?;
         let mut stream = None;
         if let Obj::Dict(d) = &obj
             && self.eat_keyword(b"stream")
         {
             stream = Some(self.stream_range(d)?);
         }
-        Some(Indirect { num, obj, stream })
+        Some(Indirect {
+            num,
+            gen_,
+            obj,
+            stream,
+        })
     }
 
     /// The byte range of the stream data that starts after the `stream` keyword. The declared `/Length` is
@@ -387,13 +393,13 @@ impl<'a> Lexer<'a> {
     }
 
     /// `N G obj <object>`: the object number and the object. Any stream that follows is ignored.
-    pub fn parse_indirect(&mut self) -> Option<(u32, Obj)> {
+    pub fn parse_indirect(&mut self) -> Option<(u32, u16, Obj)> {
         let num = u32::try_from(self.read_uint()?).ok()?;
-        self.read_uint()?;
+        let gen_ = u16::try_from(self.read_uint()?).ok()?;
         if !self.eat_keyword(b"obj") {
             return None;
         }
-        Some((num, self.parse_obj()?))
+        Some((num, gen_, self.parse_obj()?))
     }
 }
 

@@ -78,9 +78,6 @@ pub(crate) fn read(data: &[u8], limits: &Limits) -> Result<Xref, Failure> {
         }
     }
     let trailer = newest.ok_or(Failure::Unparseable("no trailer"))?;
-    if trailer.get(b"Encrypt").is_some() {
-        return fail("encryption is not supported yet");
-    }
     Ok(Xref {
         entries,
         trailer,

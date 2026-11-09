@@ -40,3 +40,13 @@ The rule used: **fail closed, and match pdf.js unless pdf.js is wrong.** A libra
 - Both fixtures are written (RC4 short-key and the `issue9418`-shaped hybrid files). The hybrid ones do not reproduce poppler's failure; that cause is still unknown.
 - The "never invent a size" rule for unparseable page objects (above).
 - Gemini's behaviour was not tested on any of these. The recovery cases in particular rest on "pdf.js can read it", not on what the billing reader does.
+
+## Added with the recovery scan
+
+Two more files that pdf.js reads and the library refuses, found when the scan made the last refusals visible. Both are stricter, never looser, and are in [`intended-differences.json`](intended-differences.json).
+
+| File | pdf.js | Library | Why |
+|---|---|---|---|
+| `bug1250079.pdf` | reads 1 page, 200 x 50 | `unparseable` | Every dictionary, the trailer included, has lost its `<<` and `>>`. No usable trailer is found |
+| `PDFBOX-4352-0.pdf` | reads 1 page, 200 x 50 | `unparseable` | An AES-256 file whose encryption dictionary is corrupted. pdf.js ignores the unreadable dictionary and reads the file as unencrypted. A file that says it is encrypted, and whose encryption cannot be read, has not been shown to be readable |
+

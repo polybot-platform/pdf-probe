@@ -19,5 +19,19 @@
     },
     "pdfjs": "readable, 1 page, 612 x 792",
     "reason": "The page object has an invalid header and declares a MediaBox of 595 x 2147483647; pdf.js reports the Letter default, which hides the declared box. The library never substitutes a size for a page object it cannot parse. A page that parses but has no MediaBox still gets Letter. Fixture: pdf.js's own test PDFs (bun run samples). See triage-pdfjs-samples.md."
+  },
+  "bug1250079.pdf": {
+    "expected": {
+      "verdict": "unparseable"
+    },
+    "pdfjs": "readable, 1 page, 200 x 50",
+    "reason": "Every dictionary has lost its << and >> delimiters, including the trailer. pdf.js reads it anyway; the library finds no usable trailer and refuses. Stricter, not looser. Fixture: pdf.js's own test PDFs (bun run samples). See triage-pdfjs-samples.md."
+  },
+  "PDFBOX-4352-0.pdf": {
+    "expected": {
+      "verdict": "unparseable"
+    },
+    "pdfjs": "readable, 1 page, 200 x 50",
+    "reason": "An AES-256 file whose encryption dictionary is corrupted (the opening << is damaged). pdf.js ignores the unreadable dictionary and reads the file as unencrypted; the library refuses, because a file that says it is encrypted and whose encryption cannot be read has not been shown to be readable. Fixture: pdf.js's own test PDFs (bun run samples). See triage-pdfjs-samples.md."
   }
 }

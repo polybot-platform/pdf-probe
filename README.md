@@ -2,7 +2,7 @@
 
 A small, fail-closed reader that answers two questions about an untrusted PDF: **how many pages does it have, and how big is each page?** It does not render, extract text, decode images or edit anything.
 
-> **Status: third thin slice. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes. Only the recovery scan for damaged files is not written yet, and a file that needs it is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 955, differs on 2 by design, refuses 30, and **gives a different answer on none**. See [the status table](#status) below.
+> **Status: all the planned parsing is in; not yet hardened. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes, and it rescans the file for objects when the cross-reference is damaged, as pdf.js does. A file it cannot read with confidence is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 983, differs on 4 by design (all four are refusals), and **gives a different answer on none**. Not yet done: a fuzz target, the native/wasm/npm packaging, and the measurement in a container. See [the status table](#status) below.
 
 ```
 cargo test                      # unit tests
@@ -12,16 +12,16 @@ bun run slice && bun run slice:diff   # run the crate over it and compare with p
 
 ## Status
 
-Measured on 2026-11-08 against pdf.js 6.4.299 (about 2,900 lines of Rust including tests and 130 lines of generated constant tables; no dependencies, no `unsafe`; its own inflate, MD5, SHA-2, AES and RC4):
+Measured on 2026-11-08 against pdf.js 6.4.299 (about 3,400 lines of Rust including tests and 130 lines of generated constant tables; no dependencies, no `unsafe`; its own inflate, MD5, SHA-2, AES and RC4):
 
 | Corpus | Same as pdf.js | Intended difference | Refused (fail closed) | Different answer |
 |---|---|---|---|---|
-| 68 synthetic fixtures | 63 | 1 (`empty-page-tree.pdf`) | 4 | 0 |
-| 987 pdf.js test PDFs | 955 | 2 (Brotli, unparseable page object) | 30 | 0 |
+| 68 synthetic fixtures | 67 | 1 (`empty-page-tree.pdf`) | 0 | 0 |
+| 987 pdf.js test PDFs | 983 | 4 (Brotli, an unparseable page object, two damaged files pdf.js reads and we refuse) | 0 | 0 |
 
-The refusals are damaged files, which need the recovery scan: a broken `startxref` or offset, a header that shifts every offset, trailing junk past the last kilobyte, an unreadable cross-reference, a truncated Flate stream. All 11 files that pdf.js rejects for a password are rejected here too.
+The synthetic corpus passes the differential gate (`bun run slice:diff` exits 0). All 11 files that pdf.js rejects for a password are rejected here too.
 
-Speed and memory, native build, on the 938 real files that both readers answer identically (119 MB): pdf.js 550 ms warm (712 ms first run), pdf-probe 92 ms warm, about 6 times faster. On 20 of those files: pdf.js 8.9 ms warm and 69 ms first run, pdf-probe 1.1 ms and 1.2 ms. Peak RSS for the whole process on those 20 files (4.3 MB of input): Bun reading the files 22 MB, Bun plus pdf.js 71 to 73 MB, the pdf-probe binary 6.2 MB. Per encrypted file: RC4 0.06 ms against 0.57 ms in pdf.js, AES-128 0.08 against 0.83, AES-256 revision 6 9.4 against 23.5 (the revision 6 hash is an iterated key derivation, slow by design). These are a standalone binary, not `bun:ffi`, and not at idle in a container; treat them as an ordering, not a result. They also exclude the files each reader refuses, which are the harder ones.
+Speed and memory, native build, on the 966 real files that both readers answer identically (123 MB): pdf.js 546 ms warm (696 ms first run), pdf-probe 100 ms warm, about 5 times faster. On a set of 20 of those files: pdf.js 6.8 ms warm and 71 ms first run, pdf-probe 2.2 ms and 2.6 ms; the ratio depends on which files, because AES-256 revision 6 (an iterated key derivation, 9.4 ms against 23.5 ms in pdf.js) dominates when it is present. Peak RSS for the whole process on those 20 files (1.9 MB of input): Bun reading the files 20 MB, Bun plus pdf.js 66 to 68 MB, the pdf-probe binary 3.9 MB. Per damaged fixture needing the recovery scan: 0.02 ms against 2.0 ms for pdf.js (tiny files). These are a standalone binary, not `bun:ffi`, and not at idle in a container; treat them as an ordering, not a result. They also exclude the files each reader refuses.
 
 ## Why
 

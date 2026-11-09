@@ -75,6 +75,10 @@ impl<'a> Lexer<'a> {
         Lexer { data, pos }
     }
 
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     fn peek(&self) -> Option<u8> {
         self.data.get(self.pos).copied()
     }

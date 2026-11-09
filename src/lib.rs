@@ -221,33 +221,172 @@ impl Doc<'_> {
     }
 }
 
+/// An error, and whether pdf.js would answer it by rescanning the whole file for objects.
+pub(crate) struct Fault {
+    pub failure: Failure,
+    pub recover: bool,
+}
+
+impl From<Failure> for Fault {
+    fn from(failure: Failure) -> Self {
+        Fault {
+            failure,
+            recover: false,
+        }
+    }
+}
+
+/// Errors reading an object through its cross-reference entry (pdf.js's `XRefEntryException`).
+pub(crate) fn is_entry_error(f: &Failure) -> bool {
+    const ENTRY_ERRORS: [&str; 9] = [
+        "object offset past the end",
+        "object number mismatch",
+        "unreadable object",
+        "object missing from its object stream",
+        "compressed object past the end",
+        "unreadable compressed object",
+        "object stream is missing or itself compressed",
+        "object stream offset past the end",
+        "unreadable object stream",
+    ];
+    matches!(f, Failure::Unparseable(why) if ENTRY_ERRORS.contains(why))
+}
+
+/// A resource limit was hit. That is final: it is never answered by rescanning the file, and the error is
+/// not replaced by a later one.
+pub(crate) fn is_limit_error(f: &Failure) -> bool {
+    const LIMIT_ERRORS: [&str; 6] = [
+        "decompressed data too large",
+        "xref chain too long",
+        "too many xref entries",
+        "too many objects",
+        "object budget exceeded",
+        "too many objects in an object stream",
+    ];
+    matches!(f, Failure::Unparseable(why) if LIMIT_ERRORS.contains(why))
+}
+
+impl<'a> Doc<'a> {
+    fn new(data: &'a [u8], xref: Xref, limits: &'a Limits) -> Doc<'a> {
+        let decoded = xref.decoded;
+        Doc {
+            data,
+            xref,
+            limits,
+            fetched: 0,
+            decoded,
+            objstms: HashMap::new(),
+            crypto: None,
+        }
+    }
+}
+
 /// Reads the page count and page sizes of `data`.
 pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
-    let xref = xref::read(data, limits)?;
-    let decoded = xref.decoded;
-    let mut doc = Doc {
-        data,
-        xref,
-        limits,
-        fetched: 0,
-        decoded,
-        objstms: HashMap::new(),
-        crypto: None,
+    // Offsets are relative to the `%PDF-` header, which may follow some leading junk.
+    let head = &data[..data.len().min(1024)];
+    let base = head.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
+    let data = &data[base..];
+
+    let first = match xref::read(data, limits) {
+        Ok(xref) => run(data, limits, xref),
+        Err(failure) => {
+            let recover = !is_limit_error(&failure);
+            Err(Fault { failure, recover })
+        }
     };
+    match first {
+        Ok(probe) => Ok(probe),
+        Err(Fault { recover: true, .. }) => {
+            let xref = recover(data, limits)?;
+            run(data, limits, xref).map_err(|fault| fault.failure)
+        }
+        Err(fault) => Err(fault.failure),
+    }
+}
+
+fn run(data: &[u8], limits: &Limits, xref: Xref) -> Result<Probe, Fault> {
+    let mut doc = Doc::new(data, xref, limits);
     doc.crypto = encrypt::setup(&mut doc)?;
     let (sizes, count) = pages::collect(&mut doc, limits.max_pages)?;
     if sizes.len() > limits.max_pages {
         return Err(Failure::TooManyPages {
             pages: count.unwrap_or(sizes.len()),
-        });
+        }
+        .into());
     }
     if sizes.is_empty() {
-        return Err(Failure::Empty);
+        return Err(Failure::Empty.into());
     }
     Ok(Probe {
         pages: sizes.len(),
         sizes,
     })
+}
+
+/// Whether a trailer is usable, as pdf.js judges it while rescanning: `/Root` and its `/Pages` must be
+/// dictionaries. `Some(true)` when `/Count` is also an integer.
+fn trailer_candidate(doc: &mut Doc, trailer: &lexer::Dict) -> Option<bool> {
+    let root = trailer.get(b"Root")?.clone();
+    let Ok(Obj::Dict(root)) = doc.resolve(&root) else {
+        return None;
+    };
+    let pages = root.get(b"Pages")?.clone();
+    let Ok(Obj::Dict(pages)) = doc.resolve(&pages) else {
+        return None;
+    };
+    let count = pages.get(b"Count").cloned();
+    Some(count.is_some_and(|c| doc.resolve(&c).ok().and_then(|o| o.as_int()).is_some()))
+}
+
+/// Rebuilds the cross-reference by scanning the file, and picks the trailer the way pdf.js does: the first
+/// trailer with a usable page tree and an `/ID` (and `/Encrypt`, if any trailer has one); else the last
+/// trailer with a usable page tree; else the first cross-reference dictionary; else any object with `/Root`.
+fn recover(data: &[u8], limits: &Limits) -> Result<Xref, Failure> {
+    let scan = xref::scan(data, limits)?;
+    let encrypted = scan.trailers.iter().any(|t| t.get(b"Encrypt").is_some());
+    let mut doc = Doc::new(
+        data,
+        Xref {
+            entries: scan.entries,
+            trailer: lexer::Dict::default(),
+            decoded: scan.decoded,
+        },
+        limits,
+    );
+    let mut candidate = None;
+    let mut chosen = None;
+    for trailer in &scan.trailers {
+        let Some(valid_pages) = trailer_candidate(&mut doc, trailer) else {
+            continue;
+        };
+        if valid_pages
+            && (!encrypted || trailer.get(b"Encrypt").is_some())
+            && trailer.get(b"ID").is_some()
+        {
+            chosen = Some(trailer.clone());
+            break;
+        }
+        candidate = Some(trailer.clone());
+    }
+    let mut trailer = chosen.or(candidate).or(scan.top);
+    if trailer.is_none() && scan.trailers.is_empty() {
+        let mut nums: Vec<u32> = doc.xref.entries.keys().copied().collect();
+        nums.sort_unstable();
+        for num in nums.into_iter().take(limits.max_objects) {
+            if let Ok(Obj::Dict(d)) = doc.fetch(num)
+                && d.get(b"Root").is_some()
+            {
+                trailer = Some(d);
+                break;
+            }
+        }
+    }
+    let Some(trailer) = trailer else {
+        return Err(Failure::Unparseable("no usable trailer"));
+    };
+    doc.xref.trailer = trailer;
+    Ok(doc.xref)
 }
 
 #[cfg(test)]
@@ -479,6 +618,64 @@ mod tests {
         assert_eq!(
             probe(&modern_pdf(), &limits),
             Err(Failure::Unparseable("decompressed data too large"))
+        );
+    }
+
+    /// The same file with its `startxref` value replaced.
+    fn with_startxref(mut pdf: Vec<u8>, value: &str) -> Vec<u8> {
+        let at = pdf.windows(10).rposition(|w| w == b"startxref\n").unwrap();
+        pdf.truncate(at + 10);
+        pdf.extend(format!("{value}\n%%EOF\n").bytes());
+        pdf
+    }
+
+    #[test]
+    fn a_wrong_startxref_is_recovered_by_scanning() {
+        let good = one_page("/MediaBox [0 0 612 792]");
+        for bad in ["999999", "0", "7"] {
+            let p = probe(&with_startxref(good.clone(), bad), &Limits::default()).unwrap();
+            assert_eq!(
+                p.sizes,
+                [PageSize {
+                    width: 612.0,
+                    height: 792.0
+                }],
+                "startxref {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn junk_before_the_header_shifts_every_offset() {
+        let mut pdf = b"JUNK JUNK\n".to_vec();
+        pdf.extend(one_page("/MediaBox [0 0 200 300]"));
+        assert_eq!(
+            probe(&pdf, &Limits::default()).unwrap().sizes,
+            [PageSize {
+                width: 200.0,
+                height: 300.0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_trailer_fails_closed() {
+        let pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Kids [] /Count 0 >>\nendobj\n";
+        assert_eq!(
+            probe(pdf, &Limits::default()),
+            Err(Failure::Unparseable("no usable trailer"))
+        );
+    }
+
+    #[test]
+    fn the_scan_finds_objects_after_a_wrong_startxref_in_a_modern_file() {
+        let p = probe(&with_startxref(modern_pdf(), "123456"), &Limits::default()).unwrap();
+        assert_eq!(
+            p.sizes,
+            [PageSize {
+                width: 300.0,
+                height: 400.0
+            }]
         );
     }
 

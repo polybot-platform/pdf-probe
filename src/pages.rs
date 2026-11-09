@@ -1,12 +1,31 @@
 //! The page tree: count, inheritance, and the effective size of each page.
 use crate::lexer::{Dict, Obj};
-use crate::{Doc, Failure, PageSize};
+use crate::{Doc, Failure, Fault, PageSize, is_entry_error, is_limit_error};
 
 /// Deepest page-tree nesting followed.
 const MAX_TREE_DEPTH: usize = 64;
 
-fn fail<T>(why: &'static str) -> Result<T, Failure> {
-    Err(Failure::Unparseable(why))
+fn fail<T>(why: &'static str) -> Result<T, Fault> {
+    Err(Fault::from(Failure::Unparseable(why)))
+}
+
+/// A fault that sends the reader to the recovery scan, as pdf.js does when the root or the page tree
+/// root is not a dictionary.
+fn rescan(f: Failure) -> Fault {
+    Fault {
+        recover: !is_limit_error(&f),
+        failure: f,
+    }
+}
+
+/// An error fetching part of the page tree. Only for the first and the last page does pdf.js treat a bad
+/// cross-reference entry as a reason to rescan the file; elsewhere it is an error.
+fn tree_fault(f: Failure, pages_so_far: usize, last: Option<usize>) -> Fault {
+    let at_edge = pages_so_far == 0 || Some(pages_so_far) == last;
+    Fault {
+        recover: at_edge && is_entry_error(&f) && !is_limit_error(&f),
+        failure: f,
+    }
 }
 
 /// Attributes a page inherits from its ancestors; the nearest one wins.
@@ -18,29 +37,38 @@ struct Inherit {
 }
 
 /// Walks the tree in document order and returns up to `want` page sizes.
-pub(crate) fn collect(
-    doc: &mut Doc,
-    cap: usize,
-) -> Result<(Vec<PageSize>, Option<usize>), Failure> {
+pub(crate) fn collect(doc: &mut Doc, cap: usize) -> Result<(Vec<PageSize>, Option<usize>), Fault> {
     let root_obj = doc
         .xref
         .trailer
         .get(b"Root")
         .cloned()
-        .ok_or(Failure::Unparseable("no /Root"))?;
-    let Obj::Dict(catalog) = doc.resolve(&root_obj)? else {
-        return fail("the catalog is not a dictionary");
+        .ok_or(rescan(Failure::Unparseable("no /Root")))?;
+    let catalog = match doc.resolve(&root_obj) {
+        Ok(Obj::Dict(c)) => c,
+        Ok(_) => {
+            return Err(rescan(Failure::Unparseable(
+                "the catalog is not a dictionary",
+            )));
+        }
+        Err(f) => return Err(rescan(f)),
     };
     let Some(pages_obj) = catalog.get(b"Pages").cloned() else {
-        return fail("the catalog has no /Pages");
+        return Err(rescan(Failure::Unparseable("the catalog has no /Pages")));
     };
     let root_num = if let Obj::Ref(n, _) = pages_obj {
         Some(n)
     } else {
         None
     };
-    let Obj::Dict(root) = doc.resolve(&pages_obj)? else {
-        return fail("the page tree root is not a dictionary");
+    let root = match doc.resolve(&pages_obj) {
+        Ok(Obj::Dict(r)) => r,
+        Ok(_) => {
+            return Err(rescan(Failure::Unparseable(
+                "the page tree root is not a dictionary",
+            )));
+        }
+        Err(f) => return Err(rescan(f)),
     };
 
     // A usable /Count is a non-negative integer. It is trusted, except that a tree with fewer pages gives
@@ -56,6 +84,7 @@ pub(crate) fn collect(
     let limit = count.unwrap_or(usize::MAX).min(cap.saturating_add(1));
     let mut out = Vec::new();
     let mut path: Vec<u32> = root_num.into_iter().collect();
+    let last = count.map(|c| c.saturating_sub(1));
     walk(
         doc,
         &root,
@@ -63,7 +92,7 @@ pub(crate) fn collect(
         0,
         &mut path,
         &mut out,
-        limit,
+        (limit, last),
     )?;
     Ok((out, count))
 }
@@ -75,8 +104,8 @@ fn walk(
     depth: usize,
     path: &mut Vec<u32>,
     out: &mut Vec<PageSize>,
-    limit: usize,
-) -> Result<(), Failure> {
+    (limit, last): (usize, Option<usize>),
+) -> Result<(), Fault> {
     if out.len() >= limit {
         return Ok(());
     }
@@ -88,7 +117,10 @@ fn walk(
         out.push(page_size(doc, node, inherit)?);
         return Ok(());
     };
-    let Obj::Array(kids) = doc.resolve(&kids)? else {
+    let kids = doc
+        .resolve(&kids)
+        .map_err(|f| tree_fault(f, out.len(), last))?;
+    let Obj::Array(kids) = kids else {
         return fail("/Kids is not an array");
     };
     let mut here = inherit.clone();
@@ -110,14 +142,15 @@ fn walk(
                 if path.contains(n) {
                     return fail("the page tree loops");
                 }
-                let Obj::Dict(child) = doc.fetch(*n)? else {
+                let fetched = doc.fetch(*n).map_err(|f| tree_fault(f, out.len(), last))?;
+                let Obj::Dict(child) = fetched else {
                     return fail("a page tree kid is not a dictionary");
                 };
                 path.push(*n);
-                walk(doc, &child, &here, depth + 1, path, out, limit)?;
+                walk(doc, &child, &here, depth + 1, path, out, (limit, last))?;
                 path.pop();
             }
-            Obj::Dict(child) => walk(doc, child, &here, depth + 1, path, out, limit)?,
+            Obj::Dict(child) => walk(doc, child, &here, depth + 1, path, out, (limit, last))?,
             _ => return fail("a page tree kid is not a reference"),
         }
     }

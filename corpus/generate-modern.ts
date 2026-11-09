@@ -255,6 +255,58 @@ w('xrefstm-objstm-rotate-userunit.pdf', modern({ pages: [{ box: '/MediaBox [0 0 
   o.put(`trailer\n<< /Size 6 /Root 1 0 R /XRefStm ${xsOff} >>\nstartxref\n${xr}\n%%EOF\n`)
   w('hybrid-reference-oversize.pdf', o.done())
 }
+// Hybrid file shaped like pdf.js's issue9418 (a real file that poppler cannot read). The newest section has an
+// EMPTY classic subsection ("0 0") and a trailer carrying both /Prev and /XRefStm. The /Prev table is stale: it
+// lists the compressed objects as FREE and gives the page objects the wrong offsets. The /XRefStm, which sits
+// earlier in the file than that table, has the real entries, and per the spec it is consulted before /Prev, so
+// it has to win. A reader that trusts the table finds the wrong object at each offset. Catalog and page tree
+// exist only in the object stream.
+function hybridPrev(name: string, boxes: string[], dense = false): void {
+  const o = new Out()
+  o.put('%PDF-1.5\r\n')
+  const first = 5, xs = first + boxes.length, size = xs + 1
+  const pageOffs: number[] = []
+  boxes.forEach((box, i) => {
+    pageOffs.push(o.len)
+    o.put(`${first + i} 0 obj\r\n<</Type /Page/Parent 3 0 R/MediaBox ${box}>>\r\nendobj\r\n`)
+  })
+  const kids = boxes.map((_, i) => `${first + i} 0 R`).join(' ')
+  const os = objStm([
+    { num: 1, body: '<</Type /Catalog/Pages 3 0 R>>' },
+    { num: 3, body: `<</Type /Pages/Kids [${kids}]/Count ${boxes.length}>>` },
+  ])
+  const osOff = streamObj(o, 4, os.dict, os.data)
+  const idv = '<5ED9E2B640E64244909BA93BD2A59F34><5ED9E2B640E64244909BA93BD2A59F34>'
+  // The xref stream: the real entries. Type 2 for objects 1 and 3, type 1 for the object stream and every page
+  // (and its own position, added by the helper).
+  const real: XEntry[] = [[1, 2, 4, 0], [3, 2, 4, 1], [4, 1, osOff, 0], ...pageOffs.map((off, i): XEntry => [first + i, 1, off, 0])]
+  let xsOff: number
+  if (!dense) xsOff = xrefStream(o, xs, real, `/Root 1 0 R/ID[${idv}]`, false)
+  else {
+    // As in issue9418: no /Index, a dense run from object 0, and a /Size that stops before the stream itself.
+    const row = (t: number, a: number, b: number): Buffer => Buffer.from([t, (a >>> 24) & 255, (a >>> 16) & 255, (a >>> 8) & 255, a & 255, (b >> 8) & 255, b & 255])
+    const rows = Array.from({ length: xs }, (_, n) => {
+      const e = real.find((x) => x[0] === n)
+      return e ? row(e[1], e[2], e[3]) : row(0, 0, n === 0 ? 65535 : 0)
+    })
+    xsOff = streamObj(o, xs, `/Type /XRef /W [1 4 2] /Size ${xs} /Root 1 0 R/ID[${idv}]`, Buffer.concat(rows))
+  }
+  // The older classic table: objects 1-3 are free, the pages point at the object stream (wrong), 4 is right.
+  const oldXref = o.len
+  const f = (v: number): string => `${String(v).padStart(10, '0')} 00000 n \r\n`
+  const free = (next: number): string => `${String(next).padStart(10, '0')} 65535 f \r\n`
+  o.put(`xref\r\n0 ${size}\r\n${free(1)}${free(2)}${free(3)}${free(0)}${f(osOff)}`)
+  for (let i = 0; i < pageOffs.length; i++) o.put(f(osOff))
+  o.put(f(xsOff))
+  o.put(`trailer\r\n<</Size ${size}/Root 1 0 R/ID[${idv}]>>\r\nstartxref\r\n${oldXref}\r\n%%EOF\r\n`)
+  // The newest section: nothing in its own table, everything through /XRefStm and /Prev.
+  const newXref = o.len
+  o.put(`xref\r\n0 0\r\ntrailer\r\n<</Size ${size}/Root 1 0 R/ID[${idv}] /Prev ${oldXref}/XRefStm ${xsOff}>>\r\nstartxref\r\n${newXref}\r\n%%EOF\r\n`)
+  w(name, o.done())
+}
+hybridPrev('hybrid-prev-xrefstm-3p.pdf', ['[0 0 612 792]', '[0 0 612 792]', '[0 0 612 792]'])
+hybridPrev('hybrid-prev-xrefstm-oversize.pdf', ['[0 0 3023.75805664 2303.81567383]'])
+hybridPrev('hybrid-prev-xrefstm-dense-oversize.pdf', ['[0 0 3023.75805664 2303.81567383]'], true)
 // Encrypted: the page tree is inside an encrypted object stream, so it cannot be read without decrypting.
 for (const kind of ['rc4-128', 'aes-128', 'aes-256'] as const) {
   const version = kind === 'aes-256' ? '1.7' : '1.6'

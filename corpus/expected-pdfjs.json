@@ -1496,6 +1496,44 @@
   "verdict": "unparseable",
   "err": "Invalid PDF structure."
  },
+ "hybrid-prev-xrefstm-3p.pdf": {
+  "verdict": null,
+  "pages": 3,
+  "sizes": [
+   [
+    612,
+    792
+   ],
+   [
+    612,
+    792
+   ],
+   [
+    612,
+    792
+   ]
+  ]
+ },
+ "hybrid-prev-xrefstm-dense-oversize.pdf": {
+  "verdict": "pageSize",
+  "pages": 1,
+  "sizes": [
+   [
+    3023.758,
+    2303.816
+   ]
+  ]
+ },
+ "hybrid-prev-xrefstm-oversize.pdf": {
+  "verdict": "pageSize",
+  "pages": 1,
+  "sizes": [
+   [
+    3023.758,
+    2303.816
+   ]
+  ]
+ },
  "hybrid-reference-oversize.pdf": {
   "verdict": "pageSize",
   "pages": 1,

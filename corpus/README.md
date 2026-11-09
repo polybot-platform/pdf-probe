@@ -21,7 +21,7 @@ bun run samples && bun run samples:reference && bun run samples:poppler && bun r
 | Generator | Cases |
 |---|---|
 | `generate-classic.ts` | Classic xref; inherited and indirect MediaBox; CropBox smaller and larger; `/Rotate` (90, 270, negative, 45, inherited); `/UserUnit`; reversed and zero-area boxes; nested trees; `/Count` over and under; page-tree cycle; kid without `/Type`; empty tree; broken offsets, `startxref` and missing xref; truncation; trailing junk; garbage header; incremental update that removes a page and one that adds an oversize page; non-PDFs; Ghostscript output (classic, linearized, RC4) |
-| `generate-modern.ts` | Xref streams and object streams (the page tree exists only inside compressed data); Flate with PNG predictors; incremental updates over xref streams; a hybrid-reference file; RC4-128, RC4 under V4 with a 40 or 48-bit key, AES-128 and AES-256 (R6) encryption with an empty user password, with the page tree inside an encrypted object stream; the same with a user password set (must fail) |
+| `generate-modern.ts` | Xref streams and object streams (the page tree exists only inside compressed data); Flate with PNG predictors; incremental updates over xref streams; a hybrid-reference file; three hybrid files shaped like pdf.js's `issue9418` (an empty classic subsection, a trailer with both `/Prev` and `/XRefStm`, a stale `/Prev` table that the `/XRefStm` must shadow); RC4-128, RC4 under V4 with a 40 or 48-bit key, AES-128 and AES-256 (R6) encryption with an empty user password, with the page tree inside an encrypted object stream; the same with a user password set (must fail) |
 
 ## Intended differences
 
@@ -35,7 +35,7 @@ Deliberately **not** differences, because the library matches pdf.js: trusting `
 
 ## poppler as a third opinion
 
-`bun run poppler` runs `pdfinfo` (poppler 24.02.0) over the corpus in the same results shape. It reports what poppler says and does not try to agree with pdf.js. Against `expected-pdfjs.json`, 55 of 65 fixtures are identical. The ten that differ are the six below plus the four short-key RC4 files:
+`bun run poppler` runs `pdfinfo` (poppler 24.02.0) over the corpus in the same results shape. It reports what poppler says and does not try to agree with pdf.js. Against `expected-pdfjs.json`, 56 of 68 fixtures are identical. The twelve that differ are the six below, the four short-key RC4 files, and two `hybrid-prev-xrefstm-*oversize` files where `pdfinfo` only rounds to two decimals (3023.76 against 3023.758):
 
 | Fixture | pdf.js | poppler `pdfinfo` | What it tells us |
 |---|---|---|---|
@@ -53,7 +53,7 @@ Use poppler to break a tie between the library and pdf.js on fixtures other than
 
 `bun run samples:reference` and `bun run samples:poppler` write results in the usual shape, and `bun run samples:diff` compares them. The expected values are whatever pdf.js returns on that checkout, so nothing about these files is stored here.
 
-pdf.js and poppler agree on 962 of the 987. The 25 that differ are triaged in [`triage-pdfjs-samples.md`](triage-pdfjs-samples.md): 23 stay "match pdf.js" and 2 are intended differences (`Brotli-Prototype-FileA.pdf` and `poppler-85140-0.pdf`, in `intended-differences.json`). The seven files that pdf.js rejects and poppler reads all stay failures. One fixture is still to write: a hybrid file shaped like `issue9418`. The RC4 short-key fixtures (`enc-rc4-v4-40-*`, `enc-rc4-v4-48-*`) are written.
+pdf.js and poppler agree on 962 of the 987. The 25 that differ are triaged in [`triage-pdfjs-samples.md`](triage-pdfjs-samples.md): 23 stay "match pdf.js" and 2 are intended differences (`Brotli-Prototype-FileA.pdf` and `poppler-85140-0.pdf`, in `intended-differences.json`). The seven files that pdf.js rejects and poppler reads all stay failures. Both fixtures it called for are written: RC4 short-key (`enc-rc4-v4-40-*`, `enc-rc4-v4-48-*`) and the `issue9418`-shaped hybrid files (`hybrid-prev-xrefstm-*`). The hybrid fixtures reproduce the structure, not poppler's failure: poppler reads them, and why it fails on the real file is not known.
 
 ## Known caveats
 

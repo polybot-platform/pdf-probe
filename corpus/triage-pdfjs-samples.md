@@ -26,7 +26,7 @@ The rule used: **fail closed, and match pdf.js unless pdf.js is wrong.** A libra
 **Counts that poppler rejects (3).** `poppler-67295-0` (`/Count 9999999999`, one page) and `poppler-91414-0-53` / `-54` (`/Count` is a reference to a stream whose `/Length` refers to itself). pdf.js falls back to walking the tree and reports 1 page. Reporting the real count is safe, because it can only be lower than a lying `/Count`. This is the over-count rule already in [README.md](README.md); Gemini was not tested on an over-count.
 
 **Real-world structure that poppler cannot read (6).** pdf.js maintainers added all of these as regression tests, so reading them is the intended outcome.
-- `issue9418`: a hybrid file (`/XRefStm` plus `/Prev`), 1 page of 3023.758 x 2303.816, so `pageSize`. **Needs a fixture** modelled on it; our synthetic hybrid file passes, this real one is more demanding.
+- `issue9418`: a hybrid file (`/XRefStm` plus `/Prev`), 1 page of 3023.758 x 2303.816, so `pageSize`. **Fixtures written:** `hybrid-prev-xrefstm-*` reproduce its structure (empty `0 0` subsection, trailer with `/Prev` and `/XRefStm`, a stale `/Prev` table that the stream shadows, a dense `/Index`-less stream). Poppler reads those, so the cause of its failure on the real file is still unknown.
 - `bug1978317` (xref stream, 1.5 MB) and `issue18986` (xref stream, `type: load`): poppler reports a missing trailer or stream length.
 - `issue9105_other` and `bug1980958`: no usable xref, recovered by scanning. `issue15590`: the trailer comes before the objects and the "Pages" node is an action dictionary with no `/Kids`, read as one page. These follow the rule that a node without `/Kids` is a page, and a page with no MediaBox gets Letter.
 
@@ -37,6 +37,6 @@ The rule used: **fail closed, and match pdf.js unless pdf.js is wrong.** A libra
 ## What this adds to the plan
 
 - Two intended differences, already in `intended-differences.json`.
-- One fixture still to write: a hybrid file shaped like `issue9418`. (The RC4 short-key fixtures are written.)
+- Both fixtures are written (RC4 short-key and the `issue9418`-shaped hybrid files). The hybrid ones do not reproduce poppler's failure; that cause is still unknown.
 - The "never invent a size" rule for unparseable page objects (above).
 - Gemini's behaviour was not tested on any of these. The recovery cases in particular rest on "pdf.js can read it", not on what the billing reader does.

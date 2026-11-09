@@ -5,3 +5,7 @@ target/
 corpus/poppler-results.json
 corpus/pdfjs-samples/
 corpus/pdfprobe-results.json
+fuzz-findings/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

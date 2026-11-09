@@ -32,6 +32,21 @@ const fn tables() -> ([u8; 256], [u8; 256]) {
     (sbox, inv)
 }
 
+/// Encryption table: for input byte `x`, the MixColumns column `[2*S(x), S(x), S(x), 3*S(x)]`, big-endian.
+const fn te0() -> [u32; 256] {
+    let (sbox, _) = tables();
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let s = sbox[i];
+        let s2 = xtime(s);
+        t[i] = ((s2 as u32) << 24) | ((s as u32) << 16) | ((s as u32) << 8) | ((s2 ^ s) as u32);
+        i += 1;
+    }
+    t
+}
+
+const TE0: [u32; 256] = te0();
 const TABLES: ([u8; 256], [u8; 256]) = tables();
 const SBOX: [u8; 256] = TABLES.0;
 const INV_SBOX: [u8; 256] = TABLES.1;
@@ -50,6 +65,8 @@ fn gmul(mut a: u8, mut b: u8) -> u8 {
 
 pub(crate) struct Aes {
     round_keys: Vec<[u8; 16]>,
+    /// The same round keys as big-endian words, for the table-driven encryption.
+    enc_words: Vec<[u32; 4]>,
 }
 
 impl Aes {
@@ -86,7 +103,7 @@ impl Aes {
                 prev[3] ^ t[3],
             ]);
         }
-        let round_keys = w
+        let round_keys: Vec<[u8; 16]> = w
             .chunks_exact(4)
             .map(|c| {
                 let mut k = [0u8; 16];
@@ -96,7 +113,18 @@ impl Aes {
                 k
             })
             .collect();
-        Some(Aes { round_keys })
+        let enc_words: Vec<[u32; 4]> = round_keys
+            .iter()
+            .map(|k| {
+                core::array::from_fn(|c| {
+                    u32::from_be_bytes([k[4 * c], k[4 * c + 1], k[4 * c + 2], k[4 * c + 3]])
+                })
+            })
+            .collect();
+        Some(Aes {
+            round_keys,
+            enc_words,
+        })
     }
 
     fn rounds(&self) -> usize {
@@ -109,28 +137,36 @@ impl Aes {
         }
     }
 
-    pub fn encrypt_block(&self, s: &mut [u8; 16]) {
-        Self::add_round_key(s, &self.round_keys[0]);
-        for round in 1..=self.rounds() {
-            for b in s.iter_mut() {
-                *b = SBOX[usize::from(*b)];
-            }
-            let old = *s;
-            for c in 0..4 {
-                for r in 0..4 {
-                    s[4 * c + r] = old[4 * ((c + r) % 4) + r];
-                }
-            }
-            if round != self.rounds() {
-                for c in 0..4 {
-                    let a = [s[4 * c], s[4 * c + 1], s[4 * c + 2], s[4 * c + 3]];
-                    s[4 * c] = xtime(a[0]) ^ (xtime(a[1]) ^ a[1]) ^ a[2] ^ a[3];
-                    s[4 * c + 1] = a[0] ^ xtime(a[1]) ^ (xtime(a[2]) ^ a[2]) ^ a[3];
-                    s[4 * c + 2] = a[0] ^ a[1] ^ xtime(a[2]) ^ (xtime(a[3]) ^ a[3]);
-                    s[4 * c + 3] = (xtime(a[0]) ^ a[0]) ^ a[1] ^ a[2] ^ xtime(a[3]);
-                }
-            }
-            Self::add_round_key(s, &self.round_keys[round]);
+    /// Table-driven encryption (four lookups and four XORs per column per round).
+    pub fn encrypt_block(&self, block: &mut [u8; 16]) {
+        let rk = &self.enc_words;
+        let mut s: [u32; 4] = core::array::from_fn(|c| {
+            u32::from_be_bytes([
+                block[4 * c],
+                block[4 * c + 1],
+                block[4 * c + 2],
+                block[4 * c + 3],
+            ]) ^ rk[0][c]
+        });
+        for round in rk.iter().take(self.rounds()).skip(1) {
+            let t: [u32; 4] = core::array::from_fn(|c| {
+                TE0[(s[c] >> 24) as usize]
+                    ^ TE0[((s[(c + 1) % 4] >> 16) & 0xff) as usize].rotate_right(8)
+                    ^ TE0[((s[(c + 2) % 4] >> 8) & 0xff) as usize].rotate_right(16)
+                    ^ TE0[(s[(c + 3) % 4] & 0xff) as usize].rotate_right(24)
+                    ^ round[c]
+            });
+            s = t;
+        }
+        let last = &rk[self.rounds()];
+        for c in 0..4 {
+            let w = u32::from_be_bytes([
+                SBOX[(s[c] >> 24) as usize],
+                SBOX[((s[(c + 1) % 4] >> 16) & 0xff) as usize],
+                SBOX[((s[(c + 2) % 4] >> 8) & 0xff) as usize],
+                SBOX[(s[(c + 3) % 4] & 0xff) as usize],
+            ]) ^ last[c];
+            block[4 * c..4 * c + 4].copy_from_slice(&w.to_be_bytes());
         }
     }
 

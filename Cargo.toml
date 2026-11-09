@@ -18,3 +18,13 @@ panic = "abort"
 lto = true
 codegen-units = 1
 opt-level = "s"
+
+# For fuzzing (`cargo run --profile fuzz --example fuzz`): optimised, but unwinding (so a panic can be caught and
+# reported) and with overflow checks, which the release profile turns into silent wrapping.
+[profile.fuzz]
+inherits = "release"
+panic = "unwind"
+debug-assertions = true
+overflow-checks = true
+lto = false
+codegen-units = 16

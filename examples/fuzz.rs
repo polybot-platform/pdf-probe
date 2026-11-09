@@ -293,6 +293,9 @@ fn check(p: &pdf_probe::Probe, limits: &Limits) -> Result<(), String> {
     if p.pages == 0 || p.pages != p.sizes.len() {
         return Err(format!("pages {} but {} sizes", p.pages, p.sizes.len()));
     }
+    if p.work == 0 || p.work > limits.max_work {
+        return Err(format!("work {} outside 1..={}", p.work, limits.max_work));
+    }
     if p.pages > limits.max_pages {
         return Err(format!(
             "{} pages over the cap {}",
@@ -313,6 +316,7 @@ fn outcome(r: &Result<pdf_probe::Probe, Failure>) -> String {
         Err(Failure::Empty) => "empty".into(),
         Err(Failure::TooManyPages { .. }) => "toomany".into(),
         Err(Failure::Unparseable(why)) => format!("err:{why}"),
+        Err(Failure::LimitExceeded(limit)) => format!("limit:{}", limit.name()),
     }
 }
 
@@ -375,6 +379,7 @@ fn main() {
         max_objects: 200_000,
         max_xref_sections: 64,
         max_decompressed: 8 << 20,
+        ..Limits::default()
     };
 
     // Silence the default panic message; panics are reported as findings.

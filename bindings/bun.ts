@@ -20,7 +20,7 @@ export async function loadPdfProbe(path?: string) {
   const lib = dlopen(path ?? (await defaultLibraryPath()), {
     pdf_probe_abi_version: { args: [], returns: FFIType.u32 },
     pdf_probe_check: {
-      args: [FFIType.ptr, FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u64],
+      args: [FFIType.ptr, FFIType.u64, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u64],
       returns: FFIType.i32,
     },
   })
@@ -29,12 +29,23 @@ export async function loadPdfProbe(path?: string) {
 
   let out = new Uint8Array(HEADER + 256)
 
-  /** Reads the page count and sizes of `bytes`. Never throws for a bad PDF; throws only for a bad call. */
-  function check(bytes: Uint8Array, maxPages: number): ProbeResult {
+  /**
+   * Reads the page count and sizes of `bytes`. Never throws for a bad PDF; throws only for a bad call.
+   * `maxInputBytes` and `maxWorkMillions` of 0 mean the library's defaults.
+   */
+  function check(bytes: Uint8Array, maxPages: number, maxInputBytes = 0, maxWorkMillions = 0): ProbeResult {
     const want = bufferSizeFor(maxPages)
     if (out.length < want) out = new Uint8Array(want)
     const call = () =>
-      lib.symbols.pdf_probe_check(bytes.length ? ptr(bytes) : null, bytes.length, maxPages, ptr(out), out.length)
+      lib.symbols.pdf_probe_check(
+        bytes.length ? ptr(bytes) : null,
+        bytes.length,
+        maxPages,
+        maxInputBytes,
+        maxWorkMillions,
+        ptr(out),
+        out.length,
+      )
     let needed = call()
     if (needed > out.length) {
       out = new Uint8Array(needed)

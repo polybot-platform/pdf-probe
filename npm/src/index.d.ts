@@ -5,7 +5,11 @@ export type ProbeResult =
   | { status: 'unparseable'; reason: string }
   | { status: 'empty' }
   | { status: 'tooManyPages'; pages: number }
+  | { status: 'limitExceeded'; limit: LimitName }
   | { status: 'panic'; reason: string }
+
+/** Which limit was hit. */
+export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed'
 
 /** `auto` uses the native library under Bun when one is found for this platform, and WebAssembly otherwise. */
 export type Engine = 'auto' | 'native' | 'wasm'
@@ -23,6 +27,18 @@ export interface CreateOptions {
 export interface CheckOptions {
   /** More pages than this is reported as `tooManyPages`. At most 1,000,000. Default 10,000. */
   maxPages?: number
+  /**
+   * The largest input accepted, in bytes. A larger one is `limitExceeded` (`inputBytes`) before anything is
+   * parsed. At most 4,294,967,295. Default 10 MiB.
+   */
+  maxInputBytes?: number
+  /**
+   * A budget of work units for the call; running out is `limitExceeded` (`work`). A unit is roughly a
+   * nanosecond of work on a modern core, and the count is the same on every machine, so the same input always
+   * costs the same. Rounded up to a multiple of one million. Default about 1.07 billion (roughly a second).
+   * It catches work that is large only in total, such as one object re-parsed for every page.
+   */
+  maxWork?: number
 }
 
 export interface Probe {
@@ -30,7 +46,8 @@ export interface Probe {
   readonly engine: 'native' | 'wasm'
   /**
    * Reads the page count and each page's size, in points. A damaged, encrypted or otherwise unreadable PDF is
-   * a result (`unparseable`, `empty`, `tooManyPages`), not an exception. It throws only for a bad call.
+   * a result (`unparseable`, `empty`, `tooManyPages`, `limitExceeded`), not an exception. It throws only for
+   * a bad call.
    */
   check(pdf: Uint8Array | ArrayBuffer, options?: CheckOptions): ProbeResult
   /** Releases the native library. A probe cannot be used afterwards. */

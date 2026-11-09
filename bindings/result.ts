@@ -7,11 +7,15 @@ export type ProbeResult =
   | { status: 'unparseable'; reason: string }
   | { status: 'empty' }
   | { status: 'tooManyPages'; pages: number }
+  | { status: 'limitExceeded'; limit: LimitName }
   | { status: 'panic'; reason: string }
 
-export const ABI_VERSION = 1
+/** Which limit was hit. */
+export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed'
+
+export const ABI_VERSION = 2
 export const HEADER = 16
-const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic'] as const
+const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic', 'limitExceeded'] as const
 
 /** The buffer size that fits any answer for a page cap, so a retry is rarely needed. */
 export function bufferSizeFor(maxPages: number): number {
@@ -41,6 +45,8 @@ export function decodeResult(buf: Uint8Array, length: number): ProbeResult {
       return { status, reason: reason() }
     case 'tooManyPages':
       return { status, pages }
+    case 'limitExceeded':
+      return { status, limit: reason() as LimitName }
     case 'empty':
       return { status }
     default:

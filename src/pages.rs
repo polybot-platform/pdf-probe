@@ -1,5 +1,6 @@
 //! The page tree: count, inheritance, and the effective size of each page.
 use crate::lexer::{Dict, Obj};
+use crate::meter::cost;
 use crate::{Doc, Failure, Fault, PageSize, is_entry_error, is_limit_error};
 
 /// Deepest page-tree nesting followed.
@@ -137,6 +138,7 @@ fn walk(
         if out.len() >= limit {
             break;
         }
+        doc.meter.charge(cost::NODE)?;
         match kid {
             Obj::Ref(n, _) => {
                 if path.contains(n) {

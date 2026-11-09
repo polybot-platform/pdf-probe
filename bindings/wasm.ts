@@ -13,7 +13,15 @@ interface Exports {
   pdf_probe_abi_version(): number
   pdf_probe_alloc(len: number): number
   pdf_probe_free(ptr: number, len: number): void
-  pdf_probe_check(data: number, len: number, maxPages: number, out: number, outCap: number): number
+  pdf_probe_check(
+    data: number,
+    len: number,
+    maxPages: number,
+    maxInputBytes: number,
+    maxWorkMillions: number,
+    out: number,
+    outCap: number,
+  ): number
 }
 
 export interface WasmOptions {
@@ -35,8 +43,11 @@ export function loadPdfProbeWasm(wasm: BufferSource | WebAssembly.Module, option
   let x = instantiate()
   let recycles = 0
 
-  /** Reads the page count and sizes of `bytes`. Never throws for a bad PDF; throws only for a bad call. */
-  function check(bytes: Uint8Array, maxPages: number): ProbeResult {
+  /**
+   * Reads the page count and sizes of `bytes`. Never throws for a bad PDF; throws only for a bad call.
+   * `maxInputBytes` and `maxWorkMillions` of 0 mean the library's defaults.
+   */
+  function check(bytes: Uint8Array, maxPages: number, maxInputBytes = 0, maxWorkMillions = 0): ProbeResult {
     let outCap = bufferSizeFor(maxPages)
     let inPtr = 0
     let outPtr = 0
@@ -45,12 +56,12 @@ export function loadPdfProbeWasm(wasm: BufferSource | WebAssembly.Module, option
       // `memory.buffer` is replaced when the memory grows, so views are made fresh after every call.
       new Uint8Array(x.memory.buffer, inPtr, bytes.length).set(bytes)
       outPtr = x.pdf_probe_alloc(outCap)
-      let needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, outPtr, outCap)
+      let needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, maxInputBytes, maxWorkMillions, outPtr, outCap)
       if (needed > outCap) {
         x.pdf_probe_free(outPtr, outCap)
         outCap = needed
         outPtr = x.pdf_probe_alloc(outCap)
-        needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, outPtr, outCap)
+        needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, maxInputBytes, maxWorkMillions, outPtr, outCap)
       }
       if (needed < 0) throw new Error(`pdf_probe_check failed with ${needed}`)
       // Copy out of linear memory before freeing it.

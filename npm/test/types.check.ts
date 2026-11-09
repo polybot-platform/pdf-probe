@@ -5,7 +5,7 @@ import { createProbe, type CheckOptions, type CreateOptions, type Probe, type Pr
 const options: CreateOptions = { engine: 'auto', nativeLibrary: '/x.so', wasm: new Uint8Array(0), recycleAboveBytes: 1 }
 const probe: Probe = await createProbe(options)
 const engine: 'native' | 'wasm' = probe.engine
-const checkOptions: CheckOptions = { maxPages: 100 }
+const checkOptions: CheckOptions = { maxPages: 100, maxInputBytes: 1 << 20, maxWork: 5_000_000 }
 const result: ProbeResult = probe.check(new Uint8Array(0), checkOptions)
 switch (result.status) {
   case 'ok': {
@@ -21,6 +21,11 @@ switch (result.status) {
   case 'tooManyPages':
     void result.pages
     break
+  case 'limitExceeded': {
+    const limit: 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' = result.limit
+    void limit
+    break
+  }
   case 'empty':
     break
 }
@@ -31,5 +36,7 @@ void engine
 void createProbe({ engine: 'fast' })
 // @ts-expect-error pages is only on some results
 void result.pages
+// @ts-expect-error an unknown limit name
+void (result.status === 'limitExceeded' && result.limit === 'time')
 // @ts-expect-error a string is not a PDF
 void probe.check('text')

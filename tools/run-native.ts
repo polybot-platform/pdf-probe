@@ -16,6 +16,7 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.pdf')).sort()) {
     const over = r.sizes.some(([w, h]) => Math.max(w, h) / 72 > MAX.long || Math.min(w, h) / 72 > MAX.short)
     out[f] = { verdict: over ? 'pageSize' : null, pages: r.pages, sizes: r.sizes.map(([w, h]) => [round3(w), round3(h)]) }
   } else if (r.status === 'unparseable') out[f] = { verdict: 'unparseable', err: r.reason }
+  else if (r.status === 'limitExceeded') out[f] = { verdict: 'limit', err: r.limit }
   else if (r.status === 'empty') out[f] = { verdict: 'empty' }
   else if (r.status === 'tooManyPages') out[f] = { verdict: 'pages', pages: r.pages }
   else out[f] = { verdict: 'PANIC', err: r.reason }

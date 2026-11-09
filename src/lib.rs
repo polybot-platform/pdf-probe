@@ -1,34 +1,44 @@
 //! pdf-probe: how many pages does an untrusted PDF have, and how big is each page?
 //!
-//! **Second thin slice.** Classic cross-reference tables and streams, hybrid files, `/Prev` chains, object
-//! streams, Flate with PNG predictors, the page tree, and page sizes. Encryption and the recovery scan for a
-//! damaged file are not implemented yet; a file that needs either fails closed. See `docs/how-it-works.md`
-//! for the full design.
+//! One function, [`probe`], reads cross-reference tables and streams (hybrid files and `/Prev` chains
+//! included), object streams, Flate with PNG predictors, encryption with an empty user password, the page
+//! tree and page sizes, and rescans a damaged file for its objects as pdf.js does. A file it cannot read with
+//! confidence is a [`Failure`], never a guess. The input is hostile, so the work is bounded by [`Limits`].
+//! See `docs/how-it-works.md` for the design.
 #![forbid(unsafe_code)]
 
 mod crypto;
 mod encrypt;
 mod inflate;
 mod lexer;
+mod meter;
 mod pages;
 mod stream;
 mod xref;
 
 use encrypt::Crypto;
 use lexer::{Lexer, Obj};
+use meter::{Meter, cost};
 use std::collections::HashMap;
 use xref::{Entry, Xref};
 
-/// Work limits. The input is hostile, so every loop in the library is bounded by one of these.
+/// Limits on the work one call may do. The input is hostile, so every loop in the library is bounded by one
+/// of these, and a limit that is hit is reported as [`Failure::LimitExceeded`] naming which one.
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// More pages than this is reported as [`Failure::TooManyPages`].
     pub max_pages: usize,
-    /// Cross-reference entries read plus objects fetched.
+    /// The largest input accepted, in bytes. Checked before anything is parsed ([`Limit::InputBytes`]).
+    pub max_input_bytes: usize,
+    /// A budget of work units for the whole call ([`Limit::Work`]). A unit is roughly a nanosecond of work on
+    /// a modern core, and the count is the same on every machine. Catches work that is large only in total,
+    /// such as one object re-parsed for every page.
+    pub max_work: u64,
+    /// Cross-reference entries read plus objects fetched ([`Limit::Objects`]).
     pub max_objects: usize,
-    /// Cross-reference sections followed through `/Prev`.
+    /// Cross-reference sections followed through `/Prev` ([`Limit::XrefSections`]).
     pub max_xref_sections: usize,
-    /// Total bytes inflated from all streams read (cross-reference and object streams).
+    /// Total bytes inflated from all streams read ([`Limit::Decompressed`]).
     pub max_decompressed: usize,
 }
 
@@ -36,9 +46,42 @@ impl Default for Limits {
     fn default() -> Self {
         Limits {
             max_pages: 10_000,
+            max_input_bytes: 10 << 20,
+            max_work: DEFAULT_MAX_WORK,
             max_objects: 1_000_000,
             max_xref_sections: 256,
             max_decompressed: 64 << 20,
+        }
+    }
+}
+
+/// The default work budget. See [`Limits::max_work`].
+pub const DEFAULT_MAX_WORK: u64 = 1 << 30;
+
+/// Which limit was hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    /// The input is larger than [`Limits::max_input_bytes`].
+    InputBytes,
+    /// The work budget ([`Limits::max_work`]) ran out.
+    Work,
+    /// More than [`Limits::max_objects`] cross-reference entries or objects.
+    Objects,
+    /// A `/Prev` chain longer than [`Limits::max_xref_sections`].
+    XrefSections,
+    /// More than [`Limits::max_decompressed`] bytes inflated.
+    Decompressed,
+}
+
+impl Limit {
+    /// A stable name, used in the C ABI and the npm package.
+    pub fn name(self) -> &'static str {
+        match self {
+            Limit::InputBytes => "inputBytes",
+            Limit::Work => "work",
+            Limit::Objects => "objects",
+            Limit::XrefSections => "xrefSections",
+            Limit::Decompressed => "decompressed",
         }
     }
 }
@@ -55,17 +98,21 @@ pub struct PageSize {
 pub struct Probe {
     pub pages: usize,
     pub sizes: Vec<PageSize>,
+    /// The work units this call used, out of [`Limits::max_work`]. Useful for choosing a budget.
+    pub work: u64,
 }
 
 /// Why no answer was given. The input is never guessed at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// Damaged, unsupported, encrypted with a password, or a limit was hit. The text says which.
+    /// Damaged, unsupported, or encrypted with a password. The text says which.
     Unparseable(&'static str),
     /// Well-formed, but with no pages.
     Empty,
     /// More pages than [`Limits::max_pages`].
     TooManyPages { pages: usize },
+    /// A resource limit was hit. The file may be fine; it is more than this call will do.
+    LimitExceeded(Limit),
 }
 
 /// A decoded object stream: where each object starts, relative to `first`.
@@ -79,6 +126,7 @@ pub(crate) struct Doc<'a> {
     data: &'a [u8],
     pub(crate) xref: Xref,
     limits: &'a Limits,
+    meter: &'a Meter,
     fetched: usize,
     decoded: usize,
     objstms: HashMap<u32, ObjStm>,
@@ -89,7 +137,7 @@ impl Doc<'_> {
     fn spend(&mut self) -> Result<(), Failure> {
         self.fetched += 1;
         if self.fetched > self.limits.max_objects {
-            return Err(Failure::Unparseable("object budget exceeded"));
+            return Err(Failure::LimitExceeded(Limit::Objects));
         }
         Ok(())
     }
@@ -109,7 +157,11 @@ impl Doc<'_> {
                 let Some(offset) = offset else {
                     return Err(Failure::Unparseable("object offset past the end"));
                 };
-                match Lexer::new(self.data, offset).parse_indirect() {
+                let mut lx = Lexer::new(self.data, offset);
+                let parsed = lx.parse_indirect();
+                self.meter
+                    .charge(cost::PARSE * (lx.pos() - offset) as u64)?;
+                match parsed {
                     Some((n, _, obj)) if n == num => Ok(obj),
                     Some(_) => Err(Failure::Unparseable("object number mismatch")),
                     None => Err(Failure::Unparseable("unreadable object")),
@@ -145,9 +197,10 @@ impl Doc<'_> {
         if start >= stm.data.len() {
             return Err(Failure::Unparseable("compressed object past the end"));
         }
-        Lexer::new(&stm.data, start)
-            .parse_obj()
-            .ok_or(Failure::Unparseable("unreadable compressed object"))
+        let mut lx = Lexer::new(&stm.data, start);
+        let parsed = lx.parse_obj();
+        self.meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
+        parsed.ok_or(Failure::Unparseable("unreadable compressed object"))
     }
 
     fn load_objstm(&mut self, stream: u32) -> Result<ObjStm, Failure> {
@@ -168,6 +221,8 @@ impl Doc<'_> {
         let (Obj::Dict(dict), Some(range)) = (ind.obj, ind.stream) else {
             return Err(Failure::Unparseable("not an object stream"));
         };
+        self.meter
+            .charge(cost::SCAN * (range.end - offset) as u64)?;
         if ind.num != stream {
             return Err(Failure::Unparseable("object number mismatch"));
         }
@@ -180,15 +235,15 @@ impl Doc<'_> {
             return Err(Failure::Unparseable("bad object stream header"));
         };
         if n > self.limits.max_objects {
-            return Err(Failure::Unparseable("too many objects in an object stream"));
+            return Err(Failure::LimitExceeded(Limit::Objects));
         }
         let remaining = self.limits.max_decompressed.saturating_sub(self.decoded);
         let raw = &self.data[range];
         let raw = match &self.crypto {
-            Some(crypto) => crypto.decrypt_stream(stream, ind.gen_, &dict, raw)?,
+            Some(crypto) => crypto.decrypt_stream(stream, ind.gen_, &dict, raw, self.meter)?,
             None => std::borrow::Cow::Borrowed(raw),
         };
-        let bytes = stream::decode(&dict, &raw, remaining).map_err(Failure::Unparseable)?;
+        let bytes = stream::decode(&dict, &raw, remaining, self.meter)?;
         self.decoded += bytes.len();
         let mut lx = Lexer::new(&bytes, 0);
         let mut index = Vec::new();
@@ -201,6 +256,7 @@ impl Doc<'_> {
             };
             index.push((num, rel));
         }
+        self.meter.charge(cost::PARSE * lx.pos() as u64)?;
         Ok(ObjStm {
             data: bytes,
             first,
@@ -255,24 +311,17 @@ pub(crate) fn is_entry_error(f: &Failure) -> bool {
 /// A resource limit was hit. That is final: it is never answered by rescanning the file, and the error is
 /// not replaced by a later one.
 pub(crate) fn is_limit_error(f: &Failure) -> bool {
-    const LIMIT_ERRORS: [&str; 6] = [
-        "decompressed data too large",
-        "xref chain too long",
-        "too many xref entries",
-        "too many objects",
-        "object budget exceeded",
-        "too many objects in an object stream",
-    ];
-    matches!(f, Failure::Unparseable(why) if LIMIT_ERRORS.contains(why))
+    matches!(f, Failure::LimitExceeded(_))
 }
 
 impl<'a> Doc<'a> {
-    fn new(data: &'a [u8], xref: Xref, limits: &'a Limits) -> Doc<'a> {
+    fn new(data: &'a [u8], xref: Xref, limits: &'a Limits, meter: &'a Meter) -> Doc<'a> {
         let decoded = xref.decoded;
         Doc {
             data,
             xref,
             limits,
+            meter,
             fetched: 0,
             decoded,
             objstms: HashMap::new(),
@@ -283,13 +332,17 @@ impl<'a> Doc<'a> {
 
 /// Reads the page count and page sizes of `data`.
 pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
+    if data.len() > limits.max_input_bytes {
+        return Err(Failure::LimitExceeded(Limit::InputBytes));
+    }
+    let meter = Meter::new(limits.max_work);
     // Offsets are relative to the `%PDF-` header, which may follow some leading junk.
     let head = &data[..data.len().min(1024)];
     let base = head.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
     let data = &data[base..];
 
-    let first = match xref::read(data, limits) {
-        Ok(xref) => run(data, limits, xref),
+    let first = match xref::read(data, limits, &meter) {
+        Ok(xref) => run(data, limits, &meter, xref),
         Err(failure) => {
             let recover = !is_limit_error(&failure);
             Err(Fault { failure, recover })
@@ -298,15 +351,15 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     match first {
         Ok(probe) => Ok(probe),
         Err(Fault { recover: true, .. }) => {
-            let xref = recover(data, limits)?;
-            run(data, limits, xref).map_err(|fault| fault.failure)
+            let xref = recover(data, limits, &meter)?;
+            run(data, limits, &meter, xref).map_err(|fault| fault.failure)
         }
         Err(fault) => Err(fault.failure),
     }
 }
 
-fn run(data: &[u8], limits: &Limits, xref: Xref) -> Result<Probe, Fault> {
-    let mut doc = Doc::new(data, xref, limits);
+fn run(data: &[u8], limits: &Limits, meter: &Meter, xref: Xref) -> Result<Probe, Fault> {
+    let mut doc = Doc::new(data, xref, limits, meter);
     doc.crypto = encrypt::setup(&mut doc)?;
     let (sizes, count) = pages::collect(&mut doc, limits.max_pages)?;
     if sizes.len() > limits.max_pages {
@@ -321,6 +374,7 @@ fn run(data: &[u8], limits: &Limits, xref: Xref) -> Result<Probe, Fault> {
     Ok(Probe {
         pages: sizes.len(),
         sizes,
+        work: meter.used(),
     })
 }
 
@@ -342,8 +396,8 @@ fn trailer_candidate(doc: &mut Doc, trailer: &lexer::Dict) -> Option<bool> {
 /// Rebuilds the cross-reference by scanning the file, and picks the trailer the way pdf.js does: the first
 /// trailer with a usable page tree and an `/ID` (and `/Encrypt`, if any trailer has one); else the last
 /// trailer with a usable page tree; else the first cross-reference dictionary; else any object with `/Root`.
-fn recover(data: &[u8], limits: &Limits) -> Result<Xref, Failure> {
-    let scan = xref::scan(data, limits)?;
+fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure> {
+    let scan = xref::scan(data, limits, meter)?;
     let encrypted = scan.trailers.iter().any(|t| t.get(b"Encrypt").is_some());
     let mut doc = Doc::new(
         data,
@@ -353,6 +407,7 @@ fn recover(data: &[u8], limits: &Limits) -> Result<Xref, Failure> {
             decoded: scan.decoded,
         },
         limits,
+        meter,
     );
     let mut candidate = None;
     let mut chosen = None;
@@ -617,8 +672,137 @@ mod tests {
         };
         assert_eq!(
             probe(&modern_pdf(), &limits),
-            Err(Failure::Unparseable("decompressed data too large"))
+            Err(Failure::LimitExceeded(Limit::Decompressed))
         );
+    }
+
+    #[test]
+    fn an_input_over_the_cap_is_refused_before_anything_is_parsed() {
+        let pdf = one_page("/MediaBox [0 0 612 792]");
+        let at = |max_input_bytes| Limits {
+            max_input_bytes,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &at(pdf.len() - 1)),
+            Err(Failure::LimitExceeded(Limit::InputBytes))
+        );
+        assert!(probe(&pdf, &at(pdf.len())).is_ok());
+        // Garbage over the cap is a limit, not a parse error: nothing was looked at.
+        assert_eq!(
+            probe(&[b'x'; 100], &at(10)),
+            Err(Failure::LimitExceeded(Limit::InputBytes))
+        );
+        // The default is 10 MiB.
+        assert_eq!(Limits::default().max_input_bytes, 10 << 20);
+    }
+
+    #[test]
+    fn the_work_a_call_used_is_reported_and_is_the_same_every_time() {
+        let pdf = modern_pdf();
+        let first = probe(&pdf, &Limits::default()).unwrap();
+        assert!(first.work > 0);
+        assert_eq!(probe(&pdf, &Limits::default()).unwrap().work, first.work);
+        assert_eq!(
+            probe(&modern_pdf(), &Limits::default()).unwrap().work,
+            first.work
+        );
+    }
+
+    #[test]
+    fn the_work_budget_is_exact() {
+        let pdf = modern_pdf();
+        let used = probe(&pdf, &Limits::default()).unwrap().work;
+        let with = |max_work| Limits {
+            max_work,
+            ..Limits::default()
+        };
+        assert!(probe(&pdf, &with(used)).is_ok());
+        assert_eq!(
+            probe(&pdf, &with(used - 1)),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
+        assert_eq!(
+            probe(&pdf, &with(0)),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
+    }
+
+    #[test]
+    fn each_structural_limit_names_itself() {
+        let pdf = one_page("/MediaBox [0 0 612 792]");
+        let hit = |limits: Limits| probe(&pdf, &limits);
+        assert_eq!(
+            hit(Limits {
+                max_objects: 2,
+                ..Limits::default()
+            }),
+            Err(Failure::LimitExceeded(Limit::Objects))
+        );
+        assert_eq!(
+            hit(Limits {
+                max_xref_sections: 0,
+                ..Limits::default()
+            }),
+            Err(Failure::LimitExceeded(Limit::XrefSections))
+        );
+    }
+
+    #[test]
+    fn a_limit_is_final_even_for_a_file_that_would_be_rescanned() {
+        // A wrong startxref sends the reader to the rescan; a budget too small for it must still be a limit,
+        // not a parse error and not a second try.
+        let pdf = with_startxref(one_page("/MediaBox [0 0 612 792]"), "999999");
+        let tight = Limits {
+            max_work: 100,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &tight),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
+        assert!(probe(&pdf, &Limits::default()).is_ok());
+    }
+
+    /// Object 3 is a big array that the root Pages node inherits as `/MediaBox`, so every page re-parses it:
+    /// the cost is pages x array size while the file stays small. See `examples/hostile.rs`.
+    fn big_inherited_box(pages: usize, elements: usize) -> Vec<u8> {
+        let kids: String = (0..pages).map(|i| format!("{} 0 R ", 4 + i)).collect();
+        let array = format!("[{}]", "0 ".repeat(elements));
+        let page = "<< /Type /Page /Parent 2 0 R >>".to_string();
+        let tree = format!("<< /Type /Pages /Kids [{kids}] /Count {pages} /MediaBox 3 0 R >>");
+        let mut objects: Vec<(u32, &str)> = vec![
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, &tree),
+            (3, &array),
+        ];
+        let numbers: Vec<u32> = (0..pages as u32).map(|i| 4 + i).collect();
+        for n in &numbers {
+            objects.push((*n, &page));
+        }
+        build(&objects, 1)
+    }
+
+    #[test]
+    fn re_parsing_one_object_for_every_page_runs_out_of_budget() {
+        let pdf = big_inherited_box(200, 20_000);
+        assert!(
+            pdf.len() < 600_000,
+            "the file is small: {} bytes",
+            pdf.len()
+        );
+        let budget = Limits {
+            max_work: 50_000_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &budget),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
+        // With the default budget the same file is still read: the budget is what stopped it, not the shape.
+        let all = probe(&pdf, &Limits::default()).unwrap();
+        assert_eq!(all.pages, 200);
+        assert!(all.work > 50_000_000, "it cost {} units", all.work);
     }
 
     /// The same file with its `startxref` value replaced.

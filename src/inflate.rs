@@ -3,6 +3,9 @@
 
 type Res<T> = Result<T, &'static str>;
 
+/// The error for output past the caller's limit. The caller maps it to a limit failure, not a damaged file.
+pub(crate) const TOO_LARGE: &str = "decompressed data too large";
+
 const LBASE: [u16; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
     163, 195, 227, 258,
@@ -164,7 +167,7 @@ fn stored(r: &mut Reader, out: &mut Vec<u8>, max_out: usize) -> Res<()> {
         .get(r.pos..r.pos + len)
         .ok_or("unexpected end of deflate data")?;
     if out.len() + len > max_out {
-        return Err("decompressed data too large");
+        return Err(TOO_LARGE);
     }
     out.extend_from_slice(body);
     r.pos += len;
@@ -244,7 +247,7 @@ fn codes(
             }
         }
         if out.len() > max_out {
-            return Err("decompressed data too large");
+            return Err(TOO_LARGE);
         }
     }
 }
@@ -299,7 +302,7 @@ mod tests {
     fn stops_at_the_output_limit() {
         let bomb = unhex(BOMB);
         assert!(bomb.len() < 2000);
-        assert_eq!(zlib(&bomb, 10_000), Err("decompressed data too large"));
+        assert_eq!(zlib(&bomb, 10_000), Err(TOO_LARGE));
         assert_eq!(zlib(&bomb, 2_000_000).unwrap().len(), 1_000_000);
     }
 

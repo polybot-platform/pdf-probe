@@ -1,7 +1,8 @@
 //! Cross-reference data: classic tables, cross-reference streams, hybrid files and the `/Prev` chain.
 //! A damaged or missing cross-reference (the recovery scan) is not supported yet: it fails closed.
 use crate::lexer::{Dict, Lexer, Obj};
-use crate::{Failure, Limits, stream};
+use crate::meter::{Meter, cost};
+use crate::{Failure, Limit, Limits, stream};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
@@ -55,7 +56,9 @@ fn find_startxref(data: &[u8]) -> usize {
     digits.parse().unwrap_or(0)
 }
 
-pub(crate) fn read(data: &[u8], limits: &Limits) -> Result<Xref, Failure> {
+pub(crate) fn read(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure> {
+    // Finding `startxref` searches backwards through the whole file.
+    meter.charge(cost::SCAN * data.len() as u64)?;
     let mut offset = find_startxref(data);
     let mut entries: HashMap<u32, Entry> = HashMap::new();
     let mut newest: Option<Dict> = None;
@@ -66,18 +69,18 @@ pub(crate) fn read(data: &[u8], limits: &Limits) -> Result<Xref, Failure> {
             break; // already read: the chain ends here, as in pdf.js
         }
         if seen.len() > limits.max_xref_sections {
-            return fail("xref chain too long");
+            return Err(Failure::LimitExceeded(Limit::XrefSections));
         }
         // A section that cannot be read ends the chain; the reader goes on with what it has, as pdf.js does.
         // With no usable section at all, the caller falls back to the recovery scan.
-        let (section, trailer) = match read_section(data, offset, limits, &mut decoded) {
+        let (section, trailer) = match read_section(data, offset, limits, &mut decoded, meter) {
             Ok(read) => read,
             Err(e) if newest.is_none() => return Err(e),
             Err(_) => break,
         };
         for (num, entry) in section {
             if entries.len() >= limits.max_objects && !entries.contains_key(&num) {
-                return fail("too many xref entries");
+                return Err(Failure::LimitExceeded(Limit::Objects));
             }
             // The newest section wins, free entries included (a removed object stays removed).
             entries.entry(num).or_insert(entry);
@@ -111,13 +114,14 @@ fn read_section(
     offset: usize,
     limits: &Limits,
     decoded: &mut usize,
+    meter: &Meter,
 ) -> Result<(Section, Dict), Failure> {
     if offset >= data.len() {
         return fail("xref offset past the end");
     }
     let mut lx = Lexer::new(data, offset);
     if !lx.eat_keyword(b"xref") {
-        return read_xref_stream(data, offset, limits, decoded);
+        return read_xref_stream(data, offset, limits, decoded, meter);
     }
     let mut section = Section::new();
     loop {
@@ -129,7 +133,7 @@ fn read_section(
         };
         for i in 0..count {
             if section.len() >= limits.max_objects {
-                return fail("too many xref entries");
+                return Err(Failure::LimitExceeded(Limit::Objects));
             }
             let (Some(off), Some(_gen)) = (lx.read_uint(), lx.read_uint()) else {
                 return fail("bad xref entry");
@@ -147,7 +151,9 @@ fn read_section(
             section.entry(num).or_insert(entry);
         }
     }
-    let Some(Obj::Dict(trailer)) = lx.parse_obj() else {
+    let parsed = lx.parse_obj();
+    meter.charge(cost::PARSE * (lx.pos() - offset) as u64)?;
+    let Some(Obj::Dict(trailer)) = parsed else {
         return fail("bad trailer");
     };
     // Hybrid file: the stream holds the entries for objects the table lists as free or leaves out. The
@@ -156,7 +162,7 @@ fn read_section(
         let Some(at) = stm.as_int().and_then(|n| usize::try_from(n).ok()) else {
             return fail("bad /XRefStm");
         };
-        let (from_stream, _) = read_xref_stream(data, at, limits, decoded)?;
+        let (from_stream, _) = read_xref_stream(data, at, limits, decoded, meter)?;
         for (num, entry) in from_stream {
             if matches!(section.get(&num), None | Some(Entry::Free)) {
                 section.insert(num, entry);
@@ -178,6 +184,7 @@ fn read_xref_stream(
     offset: usize,
     limits: &Limits,
     decoded: &mut usize,
+    meter: &Meter,
 ) -> Result<(Section, Dict), Failure> {
     let Some(ind) = Lexer::new(data, offset).parse_indirect_full() else {
         return fail("unreadable cross-reference");
@@ -185,12 +192,14 @@ fn read_xref_stream(
     let (Obj::Dict(dict), Some(range)) = (ind.obj, ind.stream) else {
         return fail("not a cross-reference stream");
     };
+    meter.charge(cost::SCAN * (range.end - offset) as u64)?;
     if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n == b"XRef") {
         return fail("not a cross-reference stream");
     }
     let remaining = limits.max_decompressed.saturating_sub(*decoded);
-    let bytes = stream::decode(&dict, &data[range], remaining).map_err(Failure::Unparseable)?;
+    let bytes = stream::decode(&dict, &data[range], remaining, meter)?;
     *decoded += bytes.len();
+    meter.charge(bytes.len() as u64)?; // reading the entries
 
     let widths: Vec<usize> = match dict.get(b"W") {
         Some(Obj::Array(a)) if a.len() == 3 => a
@@ -234,7 +243,7 @@ fn read_xref_stream(
     for (first, count) in index {
         for i in 0..count {
             if section.len() >= limits.max_objects {
-                return fail("too many xref entries");
+                return Err(Failure::LimitExceeded(Limit::Objects));
             }
             let Some(row) = rows.next() else {
                 return fail("cross-reference stream is too short");
@@ -392,7 +401,9 @@ fn obj_header(token: &[u8]) -> Option<(u32, u32)> {
 
 /// The recovery scan: index every `N G obj` at the start of a line, every trailer, and every
 /// cross-reference stream, the way pdf.js does when the cross-reference data is missing or wrong.
-pub(crate) fn scan(data: &[u8], limits: &Limits) -> Result<Scan, Failure> {
+pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, Failure> {
+    // The scan reads the whole file once; keyword searches ahead of it only move the same cursor forward.
+    meter.charge(cost::SCAN * data.len() as u64)?;
     let n = data.len();
     let mut entries: HashMap<u32, Entry> = HashMap::new();
     let mut gens: HashMap<u32, u32> = HashMap::new();
@@ -431,7 +442,7 @@ pub(crate) fn scan(data: &[u8], limits: &Limits) -> Result<Scan, Failure> {
             };
             if update {
                 if entries.len() >= limits.max_objects && !entries.contains_key(&num) {
-                    return fail("too many objects");
+                    return Err(Failure::LimitExceeded(Limit::Objects));
                 }
                 entries.insert(num, Entry::Offset(pos as u64));
                 gens.insert(num, gen_);
@@ -476,7 +487,7 @@ pub(crate) fn scan(data: &[u8], limits: &Limits) -> Result<Scan, Failure> {
             if !seen.insert(at) || seen.len() > limits.max_xref_sections {
                 continue;
             }
-            let Ok((section, dict)) = read_section(data, at, limits, &mut decoded) else {
+            let Ok((section, dict)) = read_section(data, at, limits, &mut decoded, meter) else {
                 continue;
             };
             for (num, entry) in section {

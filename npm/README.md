@@ -14,11 +14,12 @@ switch (result.status) {
   case 'ok': // result.pages, result.sizes: [[width, height], ...] in points (1/72 inch)
   case 'tooManyPages': // result.pages
   case 'empty': // well-formed, no pages
-  case 'unparseable': // result.reason: damaged, unsupported, password-protected, or a limit was hit
+  case 'unparseable': // result.reason: damaged, unsupported or password-protected
+  case 'limitExceeded': // result.limit: 'inputBytes', 'work', 'objects', 'xrefSections' or 'decompressed'
 }
 ```
 
-A damaged or password-protected PDF is a **result**, not an exception. `check` throws only for a bad call (a wrong argument type, `maxPages` out of range, a closed probe).
+A damaged or password-protected PDF is a **result**, not an exception, and so is a limit. `check` throws only for a bad call (a wrong argument type, an option out of range, a closed probe).
 
 ## Engines
 
@@ -51,7 +52,9 @@ With both given, `auto` uses the native library and falls back to WebAssembly if
 
 - **Passwords.** Only an empty user password is tried (RC4, AES-128, AES-256). A file that needs a password is `unparseable`.
 - **Page cap.** `maxPages` (default 10,000, at most 1,000,000) bounds the work and the answer. More pages than that is `tooManyPages`.
-- **Limits.** Object count, cross-reference chain length and decompressed size are bounded inside the library; hitting one is `unparseable`.
+- **Input size.** `maxInputBytes` (default 10 MiB, at most 4,294,967,295) is checked first: a larger input is `limitExceeded` (`inputBytes`) before anything is parsed.
+- **Work budget.** `maxWork` (default about 1.07 billion units, roughly a second) bounds the total work of one call; running out is `limitExceeded` (`work`). A unit is about a nanosecond of work, but the count is deterministic: the same input costs the same everywhere. It catches work that is large only in total, such as one object re-parsed for every page (a 1 MB file can cost minutes without it). It is rounded up to a multiple of one million.
+- **Other limits.** Object count, cross-reference chain length and decompressed size are bounded inside the library with fixed defaults; hitting one is `limitExceeded` naming it. They are not options.
 - **A panic** cannot take the host down: the native library catches it at its boundary and reports `panic`; the WebAssembly engine sees a trap, discards the instance and reports `panic`. None has been found by fuzzing so far.
 - **WebAssembly memory only grows.** The WebAssembly engine replaces its instance when its memory passes `recycleAboveBytes` (default 32 MiB).
 - **Page sizes** are the effective size: MediaBox intersected with CropBox, with `/Rotate` and `/UserUnit` applied. A size limit is your policy, not the library's.

@@ -16,9 +16,11 @@ fuzz_target!(|data: &[u8]| {
         max_objects: 200_000,
         max_xref_sections: 64,
         max_decompressed: 8 << 20,
+        ..Limits::default()
     };
     if let Ok(p) = probe(data, &limits) {
         assert!(p.pages > 0 && p.pages == p.sizes.len() && p.pages <= limits.max_pages);
+        assert!(p.work > 0 && p.work <= limits.max_work);
         for s in &p.sizes {
             assert!(s.width.is_finite() && s.height.is_finite() && s.width > 0.0 && s.height > 0.0);
         }

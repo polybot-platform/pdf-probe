@@ -6,7 +6,7 @@ import { libraryFileName, loadPdfProbe as loadNative } from '../../bindings/bun.
 import type { ProbeResult } from '../../bindings/result.ts'
 import { loadPdfProbeWasm } from '../../bindings/wasm.ts'
 
-export type { PageSize, ProbeResult } from '../../bindings/result.ts'
+export type { LimitName, PageSize, ProbeResult } from '../../bindings/result.ts'
 
 /** `auto` uses the native library under Bun when one is found for this platform, and WebAssembly otherwise. */
 export type Engine = 'auto' | 'native' | 'wasm'
@@ -24,6 +24,18 @@ export interface CreateOptions {
 export interface CheckOptions {
   /** More pages than this is reported as `tooManyPages`. At most 1,000,000. Default 10,000. */
   maxPages?: number
+  /**
+   * The largest input accepted, in bytes. A larger one is `limitExceeded` (`inputBytes`) before anything is
+   * parsed. At most 4,294,967,295. Default 10 MiB.
+   */
+  maxInputBytes?: number
+  /**
+   * A budget of work units for the call; running out is `limitExceeded` (`work`). A unit is roughly a
+   * nanosecond of work on a modern core, and the count is the same on every machine, so the same input always
+   * costs the same. Rounded up to a multiple of one million. Default about 1.07 billion (roughly a second).
+   * It catches work that is large only in total, such as one object re-parsed for every page.
+   */
+  maxWork?: number
 }
 
 export interface Probe {
@@ -31,7 +43,8 @@ export interface Probe {
   readonly engine: 'native' | 'wasm'
   /**
    * Reads the page count and each page's size, in points. A damaged, encrypted or otherwise unreadable PDF is
-   * a result (`unparseable`, `empty`, `tooManyPages`), not an exception. It throws only for a bad call.
+   * a result (`unparseable`, `empty`, `tooManyPages`, `limitExceeded`), not an exception. It throws only for
+   * a bad call.
    */
   check(pdf: Uint8Array | ArrayBuffer, options?: CheckOptions): ProbeResult
   /** Releases the native library. A probe cannot be used afterwards. */
@@ -40,28 +53,42 @@ export interface Probe {
 
 const DEFAULT_MAX_PAGES = 10_000
 const MAX_PAGES_CEILING = 1_000_000
+const U32_MAX = 0xffff_ffff
 
 const isBun = (): boolean => typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined'
 const isNodeLike = (): boolean => typeof process !== 'undefined' && typeof process.versions?.node === 'string'
 
-function prepare(pdf: Uint8Array | ArrayBuffer, options: CheckOptions | undefined): [Uint8Array, number] {
+/** The arguments for the engines: the bytes, then the three limits (0 for the last two means the default). */
+function prepare(
+  pdf: Uint8Array | ArrayBuffer,
+  options: CheckOptions | undefined,
+): [bytes: Uint8Array, maxPages: number, maxInputBytes: number, maxWorkMillions: number] {
   const bytes = pdf instanceof Uint8Array ? pdf : pdf instanceof ArrayBuffer ? new Uint8Array(pdf) : undefined
   if (!bytes) throw new TypeError('pdf must be a Uint8Array (a Buffer is one) or an ArrayBuffer')
   const maxPages = options?.maxPages ?? DEFAULT_MAX_PAGES
   if (!Number.isInteger(maxPages) || maxPages < 0 || maxPages > MAX_PAGES_CEILING) {
     throw new RangeError(`maxPages must be an integer from 0 to ${MAX_PAGES_CEILING}`)
   }
-  return [bytes, maxPages]
+  const maxInputBytes = options?.maxInputBytes ?? 0
+  if (!Number.isInteger(maxInputBytes) || maxInputBytes < 0 || maxInputBytes > U32_MAX || (options?.maxInputBytes !== undefined && maxInputBytes < 1)) {
+    throw new RangeError(`maxInputBytes must be an integer from 1 to ${U32_MAX}`)
+  }
+  const maxWork = options?.maxWork
+  if (maxWork !== undefined && (!Number.isInteger(maxWork) || maxWork < 1 || Math.ceil(maxWork / 1e6) > U32_MAX)) {
+    throw new RangeError('maxWork must be an integer of at least 1 (and at most about 4.29e15)')
+  }
+  return [bytes, maxPages, maxInputBytes, maxWork === undefined ? 0 : Math.ceil(maxWork / 1e6)]
 }
 
-function wrap(engine: 'native' | 'wasm', run: (b: Uint8Array, max: number) => ProbeResult, release: () => void): Probe {
+type Run = (bytes: Uint8Array, maxPages: number, maxInputBytes: number, maxWorkMillions: number) => ProbeResult
+
+function wrap(engine: 'native' | 'wasm', run: Run, release: () => void): Probe {
   let closed = false
   return {
     engine,
     check(pdf, options) {
       if (closed) throw new Error('this probe is closed')
-      const [bytes, maxPages] = prepare(pdf, options)
-      return run(bytes, maxPages)
+      return run(...prepare(pdf, options))
     },
     close() {
       if (!closed) release()

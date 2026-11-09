@@ -71,6 +71,87 @@ test('the wasm instance is replaced above the memory threshold, with the same an
   for (let i = 0; i < 5; i++) assert.equal(probe.check(pdf).status, 'ok')
 })
 
+// --- limits, on every engine that can run here ---------------------------------------------------------------
+
+/** A classic PDF from [number, body] pairs, with a correct cross-reference table. */
+function buildPdf(objects) {
+  let out = '%PDF-1.4\n'
+  const offsets = new Map()
+  for (const [n, body] of objects) {
+    offsets.set(n, out.length)
+    out += `${n} 0 obj\n${body}\nendobj\n`
+  }
+  const size = Math.max(...objects.map(([n]) => n)) + 1
+  const xref = out.length
+  out += `xref\n0 ${size}\n`
+  for (let n = 0; n < size; n++) out += offsets.has(n) ? `${String(offsets.get(n)).padStart(10, '0')} 00000 n \n` : '0000000000 65535 f \n'
+  out += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+  return new TextEncoder().encode(out)
+}
+
+/** The root Pages node inherits /MediaBox 3 0 R, a big array, so every page re-parses it: pages x array size. */
+function bigInheritedBox(pages, elements) {
+  const kids = Array.from({ length: pages }, (_, i) => `${4 + i} 0 R`).join(' ')
+  return buildPdf([
+    [1, '<< /Type /Catalog /Pages 2 0 R >>'],
+    [2, `<< /Type /Pages /Kids [${kids}] /Count ${pages} /MediaBox 3 0 R >>`],
+    [3, `[${'0 '.repeat(elements)}]`],
+    ...Array.from({ length: pages }, (_, i) => [4 + i, '<< /Type /Page /Parent 2 0 R >>']),
+  ])
+}
+
+const engines = ['wasm', ...(hasNative ? ['native'] : [])]
+for (const engine of engines) {
+  test(`${engine}: maxInputBytes refuses a large input before parsing it`, async () => {
+    const probe = await createProbe({ engine })
+    assert.deepEqual(probe.check(pdf, { maxInputBytes: pdf.length - 1 }), { status: 'limitExceeded', limit: 'inputBytes' })
+    assert.equal(probe.check(pdf, { maxInputBytes: pdf.length }).status, 'ok')
+    // Garbage over the cap is a limit, not a parse error.
+    assert.deepEqual(probe.check(new Uint8Array(100).fill(120), { maxInputBytes: 10 }), { status: 'limitExceeded', limit: 'inputBytes' })
+  })
+
+  test(`${engine}: the default input cap is 10 MiB`, async () => {
+    const probe = await createProbe({ engine })
+    const mib10 = 10 * 1024 * 1024
+    assert.equal(probe.check(new Uint8Array(mib10)).status, 'unparseable') // at the cap: read, and not a PDF
+    assert.deepEqual(probe.check(new Uint8Array(mib10 + 1)), { status: 'limitExceeded', limit: 'inputBytes' })
+    // The cap is a parameter: raise it and the larger input is read.
+    assert.equal(probe.check(new Uint8Array(mib10 + 1), { maxInputBytes: mib10 + 1 }).status, 'unparseable')
+  })
+
+  test(`${engine}: maxWork stops work that is large only in total`, async () => {
+    const probe = await createProbe({ engine })
+    const hostile = bigInheritedBox(100, 20_000)
+    assert.ok(hostile.length < 400_000, `the file is small: ${hostile.length} bytes`)
+    assert.deepEqual(probe.check(hostile, { maxWork: 5_000_000 }), { status: 'limitExceeded', limit: 'work' })
+    // The default budget reads the same file, so it is the budget that stopped it, not the file.
+    const all = probe.check(hostile)
+    assert.equal(all.status, 'ok')
+    assert.equal(all.pages, 100)
+    // A tiny budget is rounded up to a million units, which is plenty for a tiny file.
+    assert.equal(probe.check(pdf, { maxWork: 1 }).status, 'ok')
+  })
+
+  test(`${engine}: a limit is a result, never an exception, and is the same on every call`, async () => {
+    const probe = await createProbe({ engine })
+    const hostile = bigInheritedBox(50, 20_000)
+    const first = probe.check(hostile, { maxWork: 3_000_000 })
+    for (let i = 0; i < 3; i++) assert.deepEqual(probe.check(hostile, { maxWork: 3_000_000 }), first)
+    assert.deepEqual(first, { status: 'limitExceeded', limit: 'work' })
+  })
+}
+
+test('the limit options are validated', async () => {
+  const probe = await createProbe({ engine: 'wasm' })
+  for (const bad of [0, -1, 1.5, 2 ** 32, Number.NaN, '10']) {
+    assert.throws(() => probe.check(pdf, { maxInputBytes: bad }), RangeError, `maxInputBytes ${bad}`)
+  }
+  for (const bad of [0, -1, 1.5, Number.NaN, '10']) {
+    assert.throws(() => probe.check(pdf, { maxWork: bad }), RangeError, `maxWork ${bad}`)
+  }
+  assert.equal(probe.check(pdf, { maxInputBytes: 2 ** 32 - 1 }).status, 'ok') // the largest the ABI carries
+})
+
 if (!isBun) {
   test('under Node, auto picks wasm and native explains why it cannot', async () => {
     assert.equal((await createProbe()).engine, 'wasm')

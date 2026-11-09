@@ -63,6 +63,10 @@ fn main() {
                 )
             }
             Err(Failure::Empty) => "{\"verdict\":\"empty\"}".to_string(),
+            Err(Failure::LimitExceeded(limit)) => format!(
+                "{{\"verdict\":\"limit\",\"err\":{}}}",
+                json_str(limit.name())
+            ),
             Err(Failure::TooManyPages { pages }) => {
                 format!("{{\"verdict\":\"pages\",\"pages\":{pages}}}")
             }

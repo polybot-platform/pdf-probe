@@ -11,12 +11,18 @@
 //!
 //! | Offset | Type | Meaning |
 //! |---|---|---|
-//! | 0 | u32 | status: 0 ok, 1 unparseable, 2 empty, 3 too many pages, 4 internal error (a panic) |
+//! | 0 | u32 | status: 0 ok, 1 unparseable, 2 empty, 3 too many pages, 4 internal error (a panic), 5 limit exceeded |
 //! | 4 | u32 | page count (status 0 and 3), else 0 |
 //! | 8 | u32 | number of page sizes that follow (status 0), else 0 |
 //! | 12 | u32 | length of the reason text, in bytes |
 //! | 16 | f64 x 2 each | width and height of each page in points |
-//! | after | bytes | the reason, UTF-8 (status 1 and 4), else empty |
+//! | after | bytes | the reason, UTF-8 (status 1 and 4), else empty; for status 5 the name of the limit: `inputBytes`, `work`, `objects`, `xrefSections` or `decompressed` |
+//!
+//! ## Arguments
+//!
+//! `pdf_probe_check(data, len, max_pages, max_input_bytes, max_work_millions, out, out_cap)`. `max_pages`
+//! is the page cap. `max_input_bytes` is the largest input accepted, and `max_work_millions` the work budget
+//! in millions of work units (a unit is roughly a nanosecond); **0 means the library's default** for each.
 //!
 //! The function returns the number of bytes the result needs. If that is larger than `out_cap`, nothing was
 //! written and the caller retries with a bigger buffer. A negative return is a bad argument.
@@ -26,13 +32,14 @@ use pdf_probe::{Failure, Limits, Probe, probe};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Bumped when the result layout or the function signature changes.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_UNPARSEABLE: u32 = 1;
 pub const STATUS_EMPTY: u32 = 2;
 pub const STATUS_TOO_MANY_PAGES: u32 = 3;
 pub const STATUS_PANIC: u32 = 4;
+pub const STATUS_LIMIT_EXCEEDED: u32 = 5;
 
 /// The size of the fixed header.
 pub const HEADER: usize = 16;
@@ -69,6 +76,9 @@ pub fn encode(outcome: std::thread::Result<Result<Probe, Failure>>) -> Vec<u8> {
         Ok(Err(Failure::Unparseable(why))) => with_reason(STATUS_UNPARSEABLE, 0, why),
         Ok(Err(Failure::Empty)) => with_reason(STATUS_EMPTY, 0, ""),
         Ok(Err(Failure::TooManyPages { pages })) => with_reason(STATUS_TOO_MANY_PAGES, pages, ""),
+        Ok(Err(Failure::LimitExceeded(limit))) => {
+            with_reason(STATUS_LIMIT_EXCEEDED, 0, limit.name())
+        }
         Err(payload) => {
             let msg = payload
                 .downcast_ref::<&str>()
@@ -80,11 +90,23 @@ pub fn encode(outcome: std::thread::Result<Result<Probe, Failure>>) -> Vec<u8> {
     }
 }
 
-/// Runs the parser on `data` and returns the encoded answer. Never panics.
-pub fn check(data: &[u8], max_pages: u32) -> Vec<u8> {
+/// Runs the parser on `data` and returns the encoded answer. Never panics. A `max_input_bytes` or
+/// `max_work_millions` of 0 means the library's default.
+pub fn check(data: &[u8], max_pages: u32, max_input_bytes: u32, max_work_millions: u32) -> Vec<u8> {
+    let defaults = Limits::default();
     let limits = Limits {
         max_pages: max_pages.min(MAX_PAGES_CEILING) as usize,
-        ..Limits::default()
+        max_input_bytes: if max_input_bytes == 0 {
+            defaults.max_input_bytes
+        } else {
+            max_input_bytes as usize
+        },
+        max_work: if max_work_millions == 0 {
+            defaults.max_work
+        } else {
+            u64::from(max_work_millions) * 1_000_000
+        },
+        ..defaults
     };
     encode(catch_unwind(AssertUnwindSafe(|| probe(data, &limits))))
 }
@@ -133,6 +155,8 @@ mod abi {
         data: *const u8,
         len: usize,
         max_pages: u32,
+        max_input_bytes: u32,
+        max_work_millions: u32,
         out: *mut u8,
         out_cap: usize,
     ) -> i32 {
@@ -145,7 +169,7 @@ mod abi {
         } else {
             unsafe { std::slice::from_raw_parts(data, len) }
         };
-        let encoded = check(input, max_pages);
+        let encoded = check(input, max_pages, max_input_bytes, max_work_millions);
         let Ok(needed) = i32::try_from(encoded.len()) else {
             return -2;
         };
@@ -175,6 +199,7 @@ mod tests {
     #[test]
     fn a_successful_answer_has_a_header_and_the_sizes() {
         let probe = Probe {
+            work: 0,
             pages: 2,
             sizes: vec![
                 PageSize {
@@ -222,10 +247,50 @@ mod tests {
     #[test]
     fn check_reads_a_real_file_end_to_end() {
         let pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n";
-        let b = check(pdf, 10);
+        let b = check(pdf, 10, 0, 0);
         assert_eq!((u32_at(&b, 0), u32_at(&b, 4)), (STATUS_OK, 1));
         assert_eq!((f64_at(&b, 16), f64_at(&b, 24)), (300.0, 400.0));
-        assert_eq!(u32_at(&check(b"not a pdf", 10), 0), STATUS_UNPARSEABLE);
+        assert_eq!(
+            u32_at(&check(b"not a pdf", 10, 0, 0), 0),
+            STATUS_UNPARSEABLE
+        );
+    }
+
+    #[test]
+    fn a_limit_is_its_own_status_and_names_the_limit() {
+        let b = encode(Ok(Err(Failure::LimitExceeded(pdf_probe::Limit::Work))));
+        assert_eq!(u32_at(&b, 0), STATUS_LIMIT_EXCEEDED);
+        assert_eq!(&b[HEADER..], b"work");
+        for (limit, name) in [
+            (pdf_probe::Limit::InputBytes, "inputBytes"),
+            (pdf_probe::Limit::Objects, "objects"),
+            (pdf_probe::Limit::XrefSections, "xrefSections"),
+            (pdf_probe::Limit::Decompressed, "decompressed"),
+        ] {
+            assert_eq!(
+                &encode(Ok(Err(Failure::LimitExceeded(limit))))[HEADER..],
+                name.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn the_input_cap_is_a_parameter_and_zero_means_the_default() {
+        let pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n";
+        // A cap smaller than the file is refused before any parsing.
+        let refused = check(pdf, 10, pdf.len() as u32 - 1, 0);
+        assert_eq!(u32_at(&refused, 0), STATUS_LIMIT_EXCEEDED);
+        assert_eq!(&refused[HEADER..], b"inputBytes");
+        // A cap of exactly the file size, and 0 (the default of 10 MiB), both read it.
+        assert_eq!(u32_at(&check(pdf, 10, pdf.len() as u32, 0), 0), STATUS_OK);
+        assert_eq!(u32_at(&check(pdf, 10, 0, 0), 0), STATUS_OK);
+        // The same default applies to a larger input.
+        let big = vec![b' '; 11 << 20];
+        assert_eq!(&check(&big, 10, 0, 0)[HEADER..], b"inputBytes");
+        assert_ne!(
+            u32_at(&check(&big, 10, 12 << 20, 0), 0),
+            STATUS_LIMIT_EXCEEDED
+        );
     }
 
     #[test]
@@ -257,18 +322,21 @@ mod tests {
         assert_eq!(abi_version(), ABI_VERSION);
     }
 
+    /// The C function with the default input cap and work budget (0, 0).
     #[allow(unsafe_code)]
     unsafe fn abi_check(data: *const u8, len: usize, max: u32, out: *mut u8, cap: usize) -> i32 {
         unsafe extern "C" {
             fn pdf_probe_check(
                 data: *const u8,
                 len: usize,
-                max: u32,
+                max_pages: u32,
+                max_input_bytes: u32,
+                max_work_millions: u32,
                 out: *mut u8,
                 cap: usize,
             ) -> i32;
         }
-        unsafe { pdf_probe_check(data, len, max, out, cap) }
+        unsafe { pdf_probe_check(data, len, max, 0, 0, out, cap) }
     }
 
     #[allow(unsafe_code)]

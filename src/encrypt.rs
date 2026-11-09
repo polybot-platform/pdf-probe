@@ -5,6 +5,7 @@
 //! Behaviour follows pdf.js where the specification is silent; each such place says so.
 use crate::crypto::{aes, md5::md5, rc4::rc4, sha2};
 use crate::lexer::{Dict, Obj};
+use crate::meter::{Meter, cost};
 use crate::xref::Entry;
 use crate::{Doc, Failure};
 use std::borrow::Cow;
@@ -126,7 +127,7 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
     };
 
     let key = if v == 5 {
-        v5_key(&d, r, &u)?
+        v5_key(&d, r, &u, doc.meter)?
     } else {
         // Key length in bits (pdf.js: /Length, else 40 before version 4, else the stream filter's /Length).
         let mut bits = int(b"Length").unwrap_or(0);
@@ -147,6 +148,8 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
         if bits < 40 || bits % 8 != 0 || bits > 128 {
             return fail("invalid key length");
         }
+        // 51 MD5 rounds and 20 RC4 passes: a fixed, small cost.
+        doc.meter.charge(cost::CRYPTO * 4096)?;
         let encrypt_metadata = !matches!(d.get(b"EncryptMetadata"), Some(Obj::Bool(false)));
         let p = int(b"P").unwrap_or(0);
         let key = legacy_key(
@@ -238,7 +241,7 @@ fn legacy_key(
 }
 
 /// Algorithm 2.A for the user password (empty): revision 5 hashes with SHA-256, revision 6 with 2.B.
-fn v5_key(d: &Dict, r: i64, u: &[u8]) -> Result<Option<Vec<u8>>, Failure> {
+fn v5_key(d: &Dict, r: i64, u: &[u8], meter: &Meter) -> Result<Option<Vec<u8>>, Failure> {
     let ue = match d.get(b"UE") {
         Some(Obj::Str(s)) => s.as_slice(),
         _ => &[],
@@ -246,22 +249,22 @@ fn v5_key(d: &Dict, r: i64, u: &[u8]) -> Result<Option<Vec<u8>>, Failure> {
     if u.len() < 48 || ue.len() < 32 {
         return fail("bad encryption dictionary");
     }
-    let hash = |salt: &[u8]| -> Vec<u8> {
+    let hash = |salt: &[u8]| -> Result<Vec<u8>, Failure> {
         if r == 6 {
-            hash_2b(&[], salt, &[])
+            hash_2b(&[], salt, &[], meter)
         } else {
-            sha2::sha256(salt).to_vec()
+            Ok(sha2::sha256(salt).to_vec())
         }
     };
-    if hash(&u[32..40])[..32] != u[..32] {
+    if hash(&u[32..40])?[..32] != u[..32] {
         return Ok(None);
     }
-    let ikey = hash(&u[40..48]);
+    let ikey = hash(&u[40..48])?;
     Ok(aes::cbc_decrypt(&ikey[..32], &[0; 16], &ue[..32]))
 }
 
 /// Algorithm 2.B (ISO 32000-2): the revision 6 hash.
-fn hash_2b(password: &[u8], salt: &[u8], udata: &[u8]) -> Vec<u8> {
+fn hash_2b(password: &[u8], salt: &[u8], udata: &[u8], meter: &Meter) -> Result<Vec<u8>, Failure> {
     let mut seed = password.to_vec();
     seed.extend_from_slice(salt);
     seed.extend_from_slice(udata);
@@ -272,9 +275,11 @@ fn hash_2b(password: &[u8], salt: &[u8], udata: &[u8]) -> Vec<u8> {
         unit.extend_from_slice(&k);
         unit.extend_from_slice(udata);
         let repeated = unit.repeat(64);
+        // One AES pass and one SHA pass over the repeated block, every round (at most about 290 rounds).
+        meter.charge(cost::CRYPTO * 2 * repeated.len() as u64)?;
         let iv: [u8; 16] = core::array::from_fn(|i| k[16 + i]);
         let Some(e) = aes::cbc_encrypt(&k[..16], &iv, &repeated) else {
-            return k;
+            return Ok(k);
         };
         // The first 16 bytes as a big-endian number, mod 3, equals their sum mod 3 (256 is 1 mod 3).
         let pick: u32 = e[..16].iter().map(|b| u32::from(*b)).sum::<u32>() % 3;
@@ -286,7 +291,7 @@ fn hash_2b(password: &[u8], salt: &[u8], udata: &[u8]) -> Vec<u8> {
         round += 1;
         let last = i64::from(*e.last().unwrap_or(&0));
         if round >= 64 && last <= round as i64 - 32 {
-            return k;
+            return Ok(k);
         }
     }
 }
@@ -337,11 +342,13 @@ impl Crypto {
         gen_: u16,
         dict: &Dict,
         raw: &'a [u8],
+        meter: &Meter,
     ) -> Result<Cow<'a, [u8]>, Failure> {
         let method = self.method_for(dict);
         if method == Method::Identity {
             return Ok(Cow::Borrowed(raw));
         }
+        meter.charge(cost::CRYPTO * raw.len() as u64)?;
         let Some(key) = &self.key else {
             return fail("a password is required");
         };
@@ -406,7 +413,7 @@ mod tests {
         let file_key: [u8; 32] = core::array::from_fn(|i| (i * 3 + 1) as u8);
         let (u, ue) = r5_entries(&file_key);
         assert_eq!(
-            v5_key(&dict_with_ue(ue), 5, &u).unwrap(),
+            v5_key(&dict_with_ue(ue), 5, &u, &Meter::new(u64::MAX)).unwrap(),
             Some(file_key.to_vec())
         );
     }
@@ -416,12 +423,23 @@ mod tests {
         let file_key = [7u8; 32];
         let (mut u, ue) = r5_entries(&file_key);
         u[0] ^= 1; // the validation hash was made from some other password
-        assert_eq!(v5_key(&dict_with_ue(ue), 5, &u).unwrap(), None);
+        assert_eq!(
+            v5_key(&dict_with_ue(ue), 5, &u, &Meter::new(u64::MAX)).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn a_short_encryption_entry_is_refused() {
-        assert!(v5_key(&dict_with_ue(vec![0; 32]), 6, &[0; 40]).is_err());
+        assert!(
+            v5_key(
+                &dict_with_ue(vec![0; 32]),
+                6,
+                &[0; 40],
+                &Meter::new(u64::MAX)
+            )
+            .is_err()
+        );
     }
 
     #[test]

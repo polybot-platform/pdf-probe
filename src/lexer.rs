@@ -57,6 +57,13 @@ fn is_delim(b: u8) -> bool {
     )
 }
 
+/// An indirect object, with the location of its stream data if it has one.
+pub(crate) struct Indirect {
+    pub num: u32,
+    pub obj: Obj,
+    pub stream: Option<std::ops::Range<usize>>,
+}
+
 pub(crate) struct Lexer<'a> {
     data: &'a [u8],
     pos: usize,
@@ -316,6 +323,67 @@ impl<'a> Lexer<'a> {
             self.pos = save;
         }
         Some(Obj::Int(n))
+    }
+
+    /// Like [`parse_indirect`](Self::parse_indirect), but also locates the data of a stream object.
+    pub fn parse_indirect_full(&mut self) -> Option<Indirect> {
+        let (num, obj) = self.parse_indirect()?;
+        let mut stream = None;
+        if let Obj::Dict(d) = &obj
+            && self.eat_keyword(b"stream")
+        {
+            stream = Some(self.stream_range(d)?);
+        }
+        Some(Indirect { num, obj, stream })
+    }
+
+    /// The byte range of the stream data that starts after the `stream` keyword. The declared `/Length` is
+    /// used when `endstream` follows it; otherwise the data runs up to the next `endstream`.
+    fn stream_range(&mut self, dict: &Dict) -> Option<std::ops::Range<usize>> {
+        let mut p = self.pos;
+        while self.data.get(p) == Some(&b' ') {
+            p += 1;
+        }
+        match self.data.get(p) {
+            Some(b'\r') => {
+                p += 1;
+                if self.data.get(p) == Some(&b'\n') {
+                    p += 1;
+                }
+            }
+            Some(b'\n') => p += 1,
+            _ => p = self.pos,
+        }
+        let start = p;
+        let declared = dict
+            .get(b"Length")
+            .and_then(Obj::as_int)
+            .and_then(|n| usize::try_from(n).ok());
+        if let Some(end) = declared.and_then(|n| start.checked_add(n))
+            && end <= self.data.len()
+            && self.endstream_at(end)
+        {
+            return Some(start..end);
+        }
+        let key = b"endstream";
+        let rel = self.data[start..]
+            .windows(key.len())
+            .position(|w| w == key)?;
+        let mut end = start + rel;
+        if end > start && self.data[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > start && self.data[end - 1] == b'\r' {
+            end -= 1;
+        }
+        Some(start..end)
+    }
+
+    fn endstream_at(&self, mut at: usize) -> bool {
+        while self.data.get(at).is_some_and(|&b| is_ws(b)) {
+            at += 1;
+        }
+        self.data[at.min(self.data.len())..].starts_with(b"endstream")
     }
 
     /// `N G obj <object>`: the object number and the object. Any stream that follows is ignored.

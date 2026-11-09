@@ -1042,6 +1042,78 @@
   "verdict": "unparseable",
   "err": "No password given"
  },
+ "enc-rc4-v4-40-empty-pw-3p.pdf": {
+  "verdict": null,
+  "pages": 3,
+  "sizes": [
+   [
+    612,
+    792
+   ],
+   [
+    612,
+    792
+   ],
+   [
+    612,
+    792
+   ]
+  ]
+ },
+ "enc-rc4-v4-40-empty-pw-oversize.pdf": {
+  "verdict": "pageSize",
+  "pages": 2,
+  "sizes": [
+   [
+    612,
+    792
+   ],
+   [
+    1700,
+    2400
+   ]
+  ]
+ },
+ "enc-rc4-v4-40-user-password-set.pdf": {
+  "verdict": "unparseable",
+  "err": "No password given"
+ },
+ "enc-rc4-v4-48-empty-pw-3p.pdf": {
+  "verdict": null,
+  "pages": 3,
+  "sizes": [
+   [
+    612,
+    792
+   ],
+   [
+    612,
+    792
+   ],
+   [
+    612,
+    792
+   ]
+  ]
+ },
+ "enc-rc4-v4-48-empty-pw-oversize.pdf": {
+  "verdict": "pageSize",
+  "pages": 2,
+  "sizes": [
+   [
+    612,
+    792
+   ],
+   [
+    1700,
+    2400
+   ]
+  ]
+ },
+ "enc-rc4-v4-48-user-password-set.pdf": {
+  "verdict": "unparseable",
+  "err": "No password given"
+ },
  "garbage-header.pdf": {
   "verdict": null,
   "pages": 2,

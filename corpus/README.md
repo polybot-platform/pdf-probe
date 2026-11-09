@@ -21,7 +21,7 @@ bun run samples && bun run samples:reference && bun run samples:poppler && bun r
 | Generator | Cases |
 |---|---|
 | `generate-classic.ts` | Classic xref; inherited and indirect MediaBox; CropBox smaller and larger; `/Rotate` (90, 270, negative, 45, inherited); `/UserUnit`; reversed and zero-area boxes; nested trees; `/Count` over and under; page-tree cycle; kid without `/Type`; empty tree; broken offsets, `startxref` and missing xref; truncation; trailing junk; garbage header; incremental update that removes a page and one that adds an oversize page; non-PDFs; Ghostscript output (classic, linearized, RC4) |
-| `generate-modern.ts` | Xref streams and object streams (the page tree exists only inside compressed data); Flate with PNG predictors; incremental updates over xref streams; a hybrid-reference file; RC4-128, AES-128 and AES-256 (R6) encryption with an empty user password, with the page tree inside an encrypted object stream; the same three with a user password set (must fail) |
+| `generate-modern.ts` | Xref streams and object streams (the page tree exists only inside compressed data); Flate with PNG predictors; incremental updates over xref streams; a hybrid-reference file; RC4-128, RC4 under V4 with a 40 or 48-bit key, AES-128 and AES-256 (R6) encryption with an empty user password, with the page tree inside an encrypted object stream; the same with a user password set (must fail) |
 
 ## Intended differences
 
@@ -35,13 +35,14 @@ Deliberately **not** differences, because the library matches pdf.js: trusting `
 
 ## poppler as a third opinion
 
-`bun run poppler` runs `pdfinfo` (poppler 24.02.0) over the corpus in the same results shape. It reports what poppler says and does not try to agree with pdf.js. Against `expected-pdfjs.json`, 53 of 59 fixtures are identical. The six that differ:
+`bun run poppler` runs `pdfinfo` (poppler 24.02.0) over the corpus in the same results shape. It reports what poppler says and does not try to agree with pdf.js. Against `expected-pdfjs.json`, 55 of 65 fixtures are identical. The ten that differ are the six below plus the four short-key RC4 files:
 
 | Fixture | pdf.js | poppler `pdfinfo` | What it tells us |
 |---|---|---|---|
 | `userunit-0.5.pdf`, `userunit-2-oversize.pdf`, `xrefstm-objstm-rotate-userunit.pdf` | `/UserUnit` applied | `/UserUnit` ignored | A limit of `pdfinfo`, which prints the box size only. Poppler gives no opinion on `/UserUnit` |
 | `page-tree-cycle.pdf` | fails (`unparseable`) | logs `Loop in Pages tree`, exits 0, reports 2 pages with the second `0 x 0` | `pdfinfo` does not fail closed on a cycle. The runner keeps the log line in a `note` field. Earlier notes saying poppler "detects the loop" meant this log line only |
 | `count-overcounts.pdf` (`/Count 500`, one page) | 1 page | fails: `Page count (500) larger than number of objects (4)` | A real disagreement. Poppler is stricter than pdf.js on an over-count. What Gemini does with an over-count was not tested, so the library follows pdf.js until it is |
+| `enc-rc4-v4-40-*` and `enc-rc4-v4-48-*` with an empty password (4 files) | readable | fails: `Unknown compression method in flate stream` | `pdfinfo` derives the per-object keys without zero-extending a short V4 key to 16 bytes, as pdf.js and the real-world files do. Same failure as pdf.js's `issue19484_1` and `_2` |
 | `empty-page-tree.pdf` | readable, 0 pages | fails: `Invalid page count 0` | Agrees with the intended difference. Poppler cannot say `empty`, so the runner reports `unparseable` |
 
 Use poppler to break a tie between the library and pdf.js on fixtures other than `/UserUnit`. On `/UserUnit` it is silent, and on a cycle read its `note` rather than the verdict.
@@ -52,7 +53,7 @@ Use poppler to break a tie between the library and pdf.js on fixtures other than
 
 `bun run samples:reference` and `bun run samples:poppler` write results in the usual shape, and `bun run samples:diff` compares them. The expected values are whatever pdf.js returns on that checkout, so nothing about these files is stored here.
 
-pdf.js and poppler agree on 962 of the 987. The 25 that differ are triaged in [`triage-pdfjs-samples.md`](triage-pdfjs-samples.md): 23 stay "match pdf.js" and 2 are intended differences (`Brotli-Prototype-FileA.pdf` and `poppler-85140-0.pdf`, in `intended-differences.json`). The seven files that pdf.js rejects and poppler reads all stay failures. Two fixtures are still to write: RC4 with a short key under V4, and a hybrid file shaped like `issue9418`.
+pdf.js and poppler agree on 962 of the 987. The 25 that differ are triaged in [`triage-pdfjs-samples.md`](triage-pdfjs-samples.md): 23 stay "match pdf.js" and 2 are intended differences (`Brotli-Prototype-FileA.pdf` and `poppler-85140-0.pdf`, in `intended-differences.json`). The seven files that pdf.js rejects and poppler reads all stay failures. One fixture is still to write: a hybrid file shaped like `issue9418`. The RC4 short-key fixtures (`enc-rc4-v4-40-*`, `enc-rc4-v4-48-*`) are written.
 
 ## Known caveats
 

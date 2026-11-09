@@ -21,7 +21,7 @@ The rule used: **fail closed, and match pdf.js unless pdf.js is wrong.** A libra
 
 **Invalid CropBox falls back to MediaBox (1).** `boundingBox_invalid`: page 3 has a CropBox that does not overlap its MediaBox. pdf.js uses the MediaBox (600 x 800); poppler returns `0 x 0`, which would slip under any size limit. Falling back to the larger box is the safe direction.
 
-**RC4 with a 40 or 48-bit key under V4 (2).** `issue19484_1` and `issue19484_2`: `/V 4 /R 4`, crypt filter `CFM /V2` with `/Length 5` and `/Length 6`, `/EncryptMetadata false`. pdf.js decrypts them with an empty password. poppler fails with `Unknown compression method in flate stream`, probably because it derived the wrong key (not checked). The library must take the key length from the crypt filter. **Needs a new fixture** (RC4, V4, short key) before the parser exists.
+**RC4 with a 40 or 48-bit key under V4 (2).** `issue19484_1` and `issue19484_2`: `/V 4 /R 4`, crypt filter `CFM /V2` with `/Length 5` and `/Length 6`, `/EncryptMetadata false`. pdf.js decrypts them with an empty password. poppler fails with `Unknown compression method in flate stream`. Confirmed by building the same kind of file: under V4, a key shorter than 16 bytes is zero-extended to 16 before the per-object keys are derived (not in the spec; pdf.js does it for exactly these two files). poppler skips that step. The library must take the key length from the crypt filter. **Fixtures written:** `enc-rc4-v4-40-*` and `enc-rc4-v4-48-*` (see `generate-modern.ts`), including the zero-extension.
 
 **Counts that poppler rejects (3).** `poppler-67295-0` (`/Count 9999999999`, one page) and `poppler-91414-0-53` / `-54` (`/Count` is a reference to a stream whose `/Length` refers to itself). pdf.js falls back to walking the tree and reports 1 page. Reporting the real count is safe, because it can only be lower than a lying `/Count`. This is the over-count rule already in [README.md](README.md); Gemini was not tested on an over-count.
 
@@ -37,6 +37,6 @@ The rule used: **fail closed, and match pdf.js unless pdf.js is wrong.** A libra
 ## What this adds to the plan
 
 - Two intended differences, already in `intended-differences.json`.
-- Two fixtures still to write: RC4 V4 with a short key, and a hybrid file shaped like `issue9418`.
+- One fixture still to write: a hybrid file shaped like `issue9418`. (The RC4 short-key fixtures are written.)
 - The "never invent a size" rule for unparseable page objects (above).
 - Gemini's behaviour was not tested on any of these. The recovery cases in particular rest on "pdf.js can read it", not on what the billing reader does.

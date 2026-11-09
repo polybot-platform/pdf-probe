@@ -51,7 +51,7 @@ function hash2B(pw: Buffer, salt: Buffer): Buffer {
   return k.subarray(0, 32)
 }
 
-type EncKind = 'rc4-128' | 'aes-128' | 'aes-256'
+type EncKind = 'rc4-128' | 'rc4-v4-40' | 'rc4-v4-48' | 'aes-128' | 'aes-256'
 interface Enc {
   kind: EncKind
   userPassword?: string
@@ -72,18 +72,27 @@ function makeEnc(kind: EncKind, userPassword = ''): Enc {
   }
   const o = randomBytes(32)
   const p = Buffer.from([0xfc, 0xff, 0xff, 0xff])
-  let key = md5(Buffer.concat([pw, PAD]).subarray(0, 32), o, p, id)
-  for (let i = 0; i < 50; i++) key = md5(key.subarray(0, 16))
-  key = key.subarray(0, 16)
+  // V4 with a short RC4 key (40 or 48 bits): the key length comes from the crypt filter's /Length in bytes, and
+  // /EncryptMetadata false adds 0xFFFFFFFF to the key hash (R >= 4). Modelled on pdf.js's issue19484.
+  const short = kind === 'rc4-v4-40' || kind === 'rc4-v4-48'
+  const n = kind === 'rc4-v4-40' ? 5 : kind === 'rc4-v4-48' ? 6 : 16
+  let key = md5(Buffer.concat([pw, PAD]).subarray(0, 32), o, p, id, ...(short ? [Buffer.alloc(4, 0xff)] : []))
+  for (let i = 0; i < 50; i++) key = md5(key.subarray(0, n))
+  key = key.subarray(0, n)
   let x = rc4(key, md5(PAD, id))
   for (let i = 1; i <= 19; i++) x = rc4(Buffer.from(key.map((b) => b ^ i)), x)
   const u = Buffer.concat([x, randomBytes(16)])
   const aes = kind === 'aes-128'
   const dict = aes
     ? `<< /Filter /Standard /V 4 /R 4 /Length 128 /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 16 >> >> /StmF /StdCF /StrF /StdCF /O ${hex(o)} /U ${hex(u)} /P -4 >>`
-    : `<< /Filter /Standard /V 2 /R 3 /Length 128 /O ${hex(o)} /U ${hex(u)} /P -4 >>`
+    : short
+      ? `<< /Filter /Standard /V 4 /R 4 /Length ${n * 8} /CF << /StdCF << /CFM /V2 /AuthEvent /DocOpen /Length ${n} >> >> /StmF /StdCF /StrF /StdCF /EncryptMetadata false /O ${hex(o)} /U ${hex(u)} /P -4 >>`
+      : `<< /Filter /Standard /V 2 /R 3 /Length 128 /O ${hex(o)} /U ${hex(u)} /P -4 >>`
+  // Under V4 a key shorter than 16 bytes is zero-extended to 16 before the per-object keys are derived (not
+  // in the spec; pdf.js does it for issue19484, poppler does not, and so cannot open these files).
+  const ext = short ? Buffer.concat([key, Buffer.alloc(16 - key.length)]) : key
   const objKey = (num: number): Buffer =>
-    md5(key, Buffer.from([num & 255, (num >> 8) & 255, (num >> 16) & 255, 0, 0]), ...(aes ? [Buffer.from('sAlT')] : [])).subarray(0, 16)
+    md5(ext, Buffer.from([num & 255, (num >> 8) & 255, (num >> 16) & 255, 0, 0]), ...(aes ? [Buffer.from('sAlT')] : [])).subarray(0, aes ? 16 : Math.min(ext.length + 5, 16))
   return {
     kind, userPassword, dict, id,
     encrypt: (d, num) => {
@@ -252,5 +261,11 @@ for (const kind of ['rc4-128', 'aes-128', 'aes-256'] as const) {
   w(`enc-${kind}-empty-pw-3p.pdf`, modern({ pages: many(3), enc: makeEnc(kind), version }).bytes)
   w(`enc-${kind}-empty-pw-oversize.pdf`, modern({ pages: [letter, big], enc: makeEnc(kind), version }).bytes)
   w(`enc-${kind}-user-password-set.pdf`, modern({ pages: many(3), enc: makeEnc(kind, 'secret'), version }).bytes)
+}
+// RC4 under V4 with a 40 or 48-bit key, the page tree inside an encrypted object stream (pdf.js issue19484 shape).
+for (const kind of ['rc4-v4-40', 'rc4-v4-48'] as const) {
+  w(`enc-${kind}-empty-pw-3p.pdf`, modern({ pages: many(3), enc: makeEnc(kind), version: '1.6' }).bytes)
+  w(`enc-${kind}-empty-pw-oversize.pdf`, modern({ pages: [letter, big], enc: makeEnc(kind), version: '1.6' }).bytes)
+  w(`enc-${kind}-user-password-set.pdf`, modern({ pages: many(3), enc: makeEnc(kind, 'secret'), version: '1.6' }).bytes)
 }
 console.log('modern fixtures written')

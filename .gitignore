@@ -9,3 +9,4 @@ fuzz-findings/
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+corpus/native-results.json

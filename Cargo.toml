@@ -8,16 +8,23 @@ repository = "https://github.com/polybot-platform/pdf-probe"
 # Not published yet. The crates.io name is reserved separately; see the project issue.
 publish = false
 
+[workspace]
+members = ["ffi"]
+# fuzz/ is its own workspace (cargo-fuzz builds it with a nightly toolchain).
+exclude = ["fuzz"]
+
 [dependencies]
 
 [lints.rust]
 unsafe_code = "forbid"
 
+# `panic` stays at its default (unwind) so the native library can catch a panic at its boundary and return a
+# status instead of taking the host process down. A wasm profile can set `panic = "abort"`.
 [profile.release]
-panic = "abort"
 lto = true
 codegen-units = 1
 opt-level = "s"
+strip = true
 
 # For fuzzing (`cargo run --profile fuzz --example fuzz`): optimised, but unwinding (so a panic can be caught and
 # reported) and with overflow checks, which the release profile turns into silent wrapping.

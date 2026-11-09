@@ -1,0 +1,20 @@
+[package]
+name = "pdf-probe-ffi"
+version = "0.0.0"
+edition = "2024"
+description = "A C ABI for pdf-probe, to load from Bun (bun:ffi) or any host that can call a shared library."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/polybot-platform/pdf-probe"
+publish = false
+
+[lib]
+# cdylib is the shared library; rlib lets `cargo test` link the same code.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pdf-probe = { path = ".." }
+
+[lints.rust]
+# The parser forbids unsafe code. This crate is the only place that needs it (raw pointers across the C ABI),
+# and it is confined to the `abi` module below.
+unsafe_code = "deny"

@@ -20,7 +20,7 @@ if (mode === 'native') {
   close = probe.close
 } else if (mode === 'wasm') {
   const { loadPdfProbeWasm } = await import('../bindings/wasm.ts')
-  const probe = loadPdfProbeWasm(await Bun.file(new URL('../target/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url).pathname).arrayBuffer())
+  const probe = loadPdfProbeWasm(await Bun.file(process.env.PDF_PROBE_WASM ?? new URL('../target/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url).pathname).arrayBuffer())
   check = (b) => probe.check(b, 10_000)
   wasmMemory = () => probe.memoryBytes() / 1048576
 } else {

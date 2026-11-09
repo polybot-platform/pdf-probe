@@ -2,11 +2,11 @@
 // shape, so the differential test covers the whole path: Rust, the C ABI, and the Bun binding.
 // Usage: bun run tools/run-native.ts corpus/out corpus/native-results.json
 import { readdirSync } from 'node:fs'
-import { loadPdfProbe } from '../bindings/bun'
+import { loadPdfProbe } from '../bindings/bun.ts'
 
 const MAX = { long: 17.5, short: 12 } // the example policy of the other runners, not part of the library
 const round3 = (x: number) => Math.round(x * 1000) / 1000
-const probe = loadPdfProbe()
+const probe = await loadPdfProbe()
 const dir = process.argv[2]
 const out: Record<string, unknown> = {}
 for (const f of readdirSync(dir).filter((x) => x.endsWith('.pdf')).sort()) {

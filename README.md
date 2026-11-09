@@ -2,7 +2,7 @@
 
 A small, fail-closed reader that answers two questions about an untrusted PDF: **how many pages does it have, and how big is each page?** It does not render, extract text, decode images or edit anything.
 
-> **Status: all the planned parsing is in; not yet hardened. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes, and it rescans the file for objects when the cross-reference is damaged, as pdf.js does. A file it cannot read with confidence is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 983, differs on 4 by design (all four are refusals), and **gives a different answer on none**. Fuzzing has found nothing so far (see [Fuzzing](#fuzzing)). A native shared library for `bun:ffi` ([Native library](#native-library)) and a WebAssembly build ([WebAssembly](#webassembly)) exist. Not yet done: a coverage-guided fuzz run, running `wasm-opt`, the npm package, and the measurement in a container. See [the status table](#status) below.
+> **Status: all the planned parsing is in; not yet hardened. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes, and it rescans the file for objects when the cross-reference is damaged, as pdf.js does. A file it cannot read with confidence is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 983, differs on 4 by design (all four are refusals), and **gives a different answer on none**. Fuzzing has found nothing so far (see [Fuzzing](#fuzzing)). A native shared library for `bun:ffi` ([Native library](#native-library)) a WebAssembly build ([WebAssembly](#webassembly)) and an npm package wrapping both ([npm package](#npm-package), not published) exist. Not yet done: a longer fuzz run, running `wasm-opt`, publishing the npm package, and the measurement in a container. See [the status table](#status) below.
 
 ```
 cargo test                      # unit tests
@@ -90,11 +90,34 @@ Measured on 2026-11-09, Bun 1.4.4, the same 20 files and method as above (`tools
 
 The module's own memory is only 2.8 MB, so most of the wasm figure is JavaScriptCore's compiled code, as the lopdf-based wasm showed on chatbot-agent #1778. Wasm is the portable choice, not the lean one: under Bun, use the native library.
 
+### npm package
+
+`npm/` is a package, `pdf-probe`, that wraps both engines in one API: `createProbe({ engine: 'auto' | 'native' | 'wasm' })` returns `{ engine, check(pdf, { maxPages }), close() }`. `auto` uses the native library under Bun when one is found for the platform and WebAssembly everywhere else. Build and test it with `bun run npm:build` and `bun run npm:test`; `bun run npm:pack` writes the tarball (8 files, 316 KB: the 8 KB bundle, the 132 KB wasm, this machine's 468 KB native library, declarations, licences). See [`npm/README.md`](npm/README.md).
+
+It is **not published**, and `package.json` is marked `"private": true` so `npm publish` refuses. Publishing is a step for the project owner: remove that line, decide the version, and reserve the name first (see the issue). A real release also needs a native library per platform, built in CI; this package carries only the one it was built on.
+
+What was checked, on 2026-11-09:
+
+- Parity with the Rust runner on both corpora, for every engine and runtime that applies (wasm on Node 24 and Bun, native and `auto` on Bun): 68 synthetic fixtures and 987 pdf.js test PDFs, 0 differences each.
+- 9 API tests on Node and 11 on Bun (`npm/test/api.test.mjs`): input types, `maxPages`, a closed probe, the wasm module given as bytes, a module, a URL or a path, instance recycling, engine selection and the native failure messages.
+- The declarations (`npm/src/index.d.ts`) type-check under `tsc --strict` with a consumer file that must also fail where it should (`npm/test/types.check.ts`); the TypeScript compiler used was 6.0.3.
+- The packed tarball installed into an empty project works on Node and Bun, and a `bun build --compile` binary built from it, run from another directory, loads both engines from its embedded files.
+
+Not checked: a browser, Deno, a platform other than Linux x86_64 glibc, and the bundle under a bundler other than Bun's.
+
 ### Fuzzing
 
-`probe` is fuzzed two ways. `cargo run --profile fuzz --example fuzz -- --seeds corpus/out --seconds 60 --rng 1` is a dependency-free mutation fuzzer that runs on stable: it mutates the corpus (byte edits, deleting, duplicating and splicing ranges, awkward numbers, PDF keywords, and length-preserving edits that keep the cross-reference valid), keeps inputs that reach a new outcome, and reports any panic, any input slower than 100 ms or that never returns, any memory jump over 128 MB, any successful answer that breaks a rule (page count matches the sizes, within the cap, finite positive sizes), and any input that gives two answers. The `fuzz` profile unwinds and turns on overflow checks, which the release profile would hide. `fuzz/` holds the conventional libFuzzer target for coverage-guided runs (`cargo +nightly fuzz run probe`; it compiles on stable but has not been run, because it needs a nightly toolchain).
+`probe` is fuzzed two ways, both on the stable toolchain.
 
-About 28 million mutated inputs have been run so far, from the 68 synthetic fixtures and about 890 of pdf.js's test PDFs under 150 KB: no panic, no hang, no memory spike, no broken rule. The only reports were two inputs over 100 ms, both AES-256 revision 6 files under heavy load (about 20 ms alone at the time; the hash is an iterated key derivation, bounded at about 290 rounds, and is now about 5.6 ms). A blind mutation fuzzer reaches the deeper code less well than a coverage-guided one, so this is evidence, not proof; the libFuzzer target is the next step.
+1. `cargo run --profile fuzz --example fuzz -- --seeds corpus/out --seconds 60 --rng 1` is a dependency-free mutation fuzzer. It mutates the corpus (byte edits, deleting, duplicating and splicing ranges, awkward numbers, PDF keywords, and length-preserving edits that keep the cross-reference valid), keeps inputs that reach a new outcome, and reports any panic, any input slower than 100 ms or that never returns, any memory jump over 128 MB, any successful answer that breaks a rule (page count matches the sizes, within the cap, finite positive sizes), and any input that gives two answers. The `fuzz` profile unwinds and turns on overflow checks, which the release profile would hide.
+2. `fuzz/run.sh [seconds] [workers]` is the coverage-guided libFuzzer target in `fuzz/`. It builds with sanitizer-coverage instrumentation through ordinary rustc flags, overflow checks and debug assertions, so it needs no nightly Rust and no `cargo-fuzz`, only a C++ compiler (`libfuzzer-sys` compiles libFuzzer itself). With nightly and `cargo-fuzz`, `cargo +nightly fuzz run probe` also works.
+
+What has been run, on 2026-11-09:
+
+- **Mutation fuzzer:** about 28 million inputs from the 68 synthetic fixtures and about 890 of pdf.js's test PDFs under 150 KB. No panic, no hang, no memory spike, no broken rule. The only reports were two inputs over 100 ms, both AES-256 revision 6 files under heavy load (about 20 ms alone at the time; the hash is an iterated key derivation, bounded at about 290 rounds, and is now about 5.6 ms).
+- **libFuzzer:** 905 seconds with 12 workers, about 2.9 million coverage-guided executions from the same 956 seeds, with overflow checks and debug assertions on. **0 crashes, 0 timeouts, 0 out-of-memory.** Edge coverage went from 1,666 to 2,377 (of 4,975 instrumented counters) and the seed corpus from 956 to 4,105 inputs.
+
+That is evidence, not proof: 15 minutes of coverage-guided fuzzing is short, and the seeds are a small, mostly well-formed set. There was no AddressSanitizer run (the code has no `unsafe`, so a memory error would be a Rust-level bug, but it was not run). A longer run, seeded from a larger real-world corpus, is the next step.
 
 ## How it differs from other tools
 

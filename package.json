@@ -17,7 +17,10 @@
     "native": "cargo build --release -p pdf-probe-ffi && bun run tools/run-native.ts corpus/out corpus/native-results.json",
     "native:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/native-results.json",
     "wasm": "cargo build --profile wasm --target wasm32-unknown-unknown -p pdf-probe-ffi && bun run tools/run-wasm.ts corpus/out corpus/wasm-results.json",
-    "wasm:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/wasm-results.json"
+    "wasm:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/wasm-results.json",
+    "npm:build": "bun run npm/build.ts",
+    "npm:test": "bun run slice && bun run npm/build.ts && node --test npm/test/api.test.mjs && bun test npm/test/api.test.mjs && node npm/test/parity.mjs wasm && bun npm/test/parity.mjs wasm && bun npm/test/parity.mjs native && bun npm/test/parity.mjs auto",
+    "npm:pack": "bun run npm/build.ts && cd npm && npm pack"
   },
   "devDependencies": {
     "unpdf": "2.1.0"

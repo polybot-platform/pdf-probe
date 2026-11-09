@@ -1,0 +1,45 @@
+{
+  "name": "pdf-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small, fail-closed reader that answers two questions about an untrusted PDF: how many pages, and how big is each page? Native (Bun) and WebAssembly engines.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/polybot-platform/pdf-probe.git"
+  },
+  "keywords": [
+    "pdf",
+    "page-count",
+    "page-size",
+    "wasm",
+    "ffi",
+    "untrusted-input"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./pdf_probe.wasm": "./dist/pdf_probe.wasm",
+    "./package.json": "./package.json",
+    "./native/*": "./native/*"
+  },
+  "files": [
+    "dist",
+    "native",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "bun run build.ts"
+  }
+}

@@ -1,13 +1,10 @@
-//! The coverage-guided fuzz target for `probe`. Needs a nightly toolchain and `cargo install cargo-fuzz`:
+//! The coverage-guided fuzz target for `probe`. The simple way to run it needs only the stable toolchain and a
+//! C++ compiler: `fuzz/run.sh [seconds] [workers]` (it builds with sanitizer-coverage flags, as cargo-fuzz would
+//! without a sanitizer). With a nightly toolchain and `cargo install cargo-fuzz`, `cargo +nightly fuzz run probe`
+//! works too, and can add AddressSanitizer.
 //!
-//! ```text
-//! bun run corpus                                   # writes corpus/out/*.pdf
-//! mkdir -p fuzz/corpus/probe && cp corpus/out/*.pdf fuzz/corpus/probe/
-//! cargo +nightly fuzz run probe -- -max_len=200000 -rss_limit_mb=1024 -timeout=5
-//! ```
-//!
-//! A crash is a panic or an abort (arithmetic overflow included: cargo-fuzz builds with overflow checks), a
-//! timeout, or a memory-limit hit. The assertions are the same rules as `examples/fuzz.rs`.
+//! A crash is a panic or an abort (arithmetic overflow included: the build keeps overflow checks), a timeout, or
+//! a memory-limit hit. The assertions are the same rules as `examples/fuzz.rs`.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

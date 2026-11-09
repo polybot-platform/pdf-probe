@@ -1,16 +1,23 @@
 // Loads the pdf-probe shared library with bun:ffi. A thin wrapper over one C function: see ffi/src/lib.rs
-// for the result layout. Not a published package yet.
-import { dlopen, FFIType, ptr, suffix } from 'bun:ffi'
+// for the result layout. `bun:ffi` is imported lazily so that this file can be bundled into a package that
+// also runs under Node, where the native engine is simply never loaded.
 import { ABI_VERSION, bufferSizeFor, decodeResult, HEADER, type ProbeResult } from './result.ts'
 
 export type { PageSize, ProbeResult } from './result.ts'
 
-export function defaultLibraryPath(): string {
-  return new URL(`../target/release/libpdf_probe_ffi.${suffix}`, import.meta.url).pathname
+/** The library file name for this platform, as `bun:ffi` names it. */
+export async function libraryFileName(): Promise<string> {
+  const { suffix } = await import('bun:ffi')
+  return `${suffix === 'dll' ? '' : 'lib'}pdf_probe_ffi.${suffix}`
 }
 
-export function loadPdfProbe(path = defaultLibraryPath()) {
-  const lib = dlopen(path, {
+export async function defaultLibraryPath(): Promise<string> {
+  return new URL(`../target/release/${await libraryFileName()}`, import.meta.url).pathname
+}
+
+export async function loadPdfProbe(path?: string) {
+  const { dlopen, FFIType, ptr } = await import('bun:ffi')
+  const lib = dlopen(path ?? (await defaultLibraryPath()), {
     pdf_probe_abi_version: { args: [], returns: FFIType.u32 },
     pdf_probe_check: {
       args: [FFIType.ptr, FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u64],

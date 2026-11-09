@@ -11,3 +11,8 @@ fuzz/corpus/
 fuzz/artifacts/
 corpus/native-results.json
 corpus/wasm-results.json
+npm/dist/
+npm/native/
+npm/*.tgz
+npm/LICENSE-MIT
+npm/LICENSE-APACHE

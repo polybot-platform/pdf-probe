@@ -14,8 +14,8 @@ let close = () => {}
 let wasmMemory = () => 0
 const t0 = performance.now()
 if (mode === 'native') {
-  const { loadPdfProbe } = await import('../bindings/bun')
-  const probe = loadPdfProbe()
+  const { loadPdfProbe } = await import('../bindings/bun.ts')
+  const probe = await loadPdfProbe()
   check = (b) => probe.check(b, 10_000)
   close = probe.close
 } else if (mode === 'wasm') {

@@ -1,6 +1,6 @@
 # How pdf-probe gets the page count and page sizes
 
-> **This is the full design; the code covers all of it except the recovery scan.** Implemented: steps 1 and 2 for classic tables, cross-reference streams and hybrid files; step 3 including the empty-password encryption branch; step 4 including object streams, Flate and PNG predictors; steps 5 and 6. Not written yet: the recovery scan, so a damaged file is refused. Each step below is what the library must do to match pdf.js on the [corpus](../corpus/README.md); the rules come from pdf.js's behaviour, the PDF specification, and the findings in [`corpus/triage-pdfjs-samples.md`](../corpus/triage-pdfjs-samples.md).
+> **This is the full design, and the code implements all of it.** What is not done is hardening (a fuzz target, packaging, a measurement in a container). Each step below is what the library must do to match pdf.js on the [corpus](../corpus/README.md); the rules come from pdf.js's behaviour, the PDF specification, and the findings in [`corpus/triage-pdfjs-samples.md`](../corpus/triage-pdfjs-samples.md). The recovery scan runs when no cross-reference section can be read, when the catalog or page tree root is not a dictionary, or when fetching the first or last page hits a bad entry, as in pdf.js.
 
 The library reads only what it needs: the end of the file, the cross-reference data, the catalog, the page tree and the page dictionaries. It does not touch content streams, fonts or images, and it does not read every object in the file.
 

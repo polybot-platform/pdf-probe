@@ -1,0 +1,20 @@
+[package]
+name = "pdf-probe"
+version = "0.0.0"
+edition = "2024"
+description = "A small, fail-closed reader that answers two questions about an untrusted PDF: how many pages, and how big is each page."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/polybot-platform/pdf-probe"
+# Not published yet. The crates.io name is reserved separately; see the project issue.
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "s"

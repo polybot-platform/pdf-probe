@@ -2,7 +2,24 @@
 
 A small, fail-closed reader that answers two questions about an untrusted PDF: **how many pages does it have, and how big is each page?** It does not render, extract text, decode images or edit anything.
 
-> **Status: planning. There is no code yet.** This repository holds the design and, soon, the test corpus. Do not depend on it.
+> **Status: first thin slice. Do not depend on it.** The crate reads classic cross-reference tables (with `/Prev`), uncompressed objects, the page tree and page sizes. Cross-reference streams, object streams, Flate, encryption, hybrid files and the recovery scan are not written yet, and a file that needs any of them is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 674, differs on 2 by design, refuses 311, and **gives a different answer on none**. See [the status table](#status) below.
+
+```
+cargo test                      # unit tests
+bun install && bun run corpus   # generate the synthetic corpus (see corpus/README.md)
+bun run slice && bun run slice:diff   # run the crate over it and compare with pdf.js
+```
+
+## Status
+
+Measured on 2026-11-08 against pdf.js 6.4.299 (about 940 lines of Rust, no dependencies, no `unsafe`):
+
+| Corpus | Same as pdf.js | Intended difference | Refused (fail closed) | Different answer |
+|---|---|---|---|---|
+| 68 synthetic fixtures | 42 | 1 (`empty-page-tree.pdf`) | 25 | 0 |
+| 987 pdf.js test PDFs | 674 | 2 (Brotli, unparseable page object) | 311 | 0 |
+
+The refusals are the features not written yet: cross-reference streams (279 of the 311), hybrid files, encryption, and the recovery scan for damaged files. Speed and memory, native build, same 657 real files that both readers answer identically (81 MB): pdf.js 108 ms warm (207 ms first run), pdf-probe 4.9 ms warm. On 20 of those files: pdf.js 7.5 ms warm and 67 ms first run, pdf-probe 0.07 ms. Peak RSS for the whole process on those 20 files (7 MB of input): Bun reading the files 24 MB, Bun plus pdf.js 75 MB, the pdf-probe binary 8.7 MB. These are a standalone binary, not `bun:ffi`, and not at idle in a container; treat them as an ordering, not a result.
 
 ## Why
 

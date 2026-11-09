@@ -11,7 +11,9 @@
     "samples": "bun run tools/fetch-pdfjs-samples.ts",
     "samples:reference": "bun run tools/run-reference.ts corpus/pdfjs-samples/repo/test/pdfs corpus/pdfjs-samples/reference-results.json",
     "samples:poppler": "bun run tools/run-poppler.ts corpus/pdfjs-samples/repo/test/pdfs corpus/pdfjs-samples/poppler-results.json",
-    "samples:diff": "bun run tools/diff-results.ts corpus/pdfjs-samples/reference-results.json corpus/pdfjs-samples/poppler-results.json"
+    "samples:diff": "bun run tools/diff-results.ts corpus/pdfjs-samples/reference-results.json corpus/pdfjs-samples/poppler-results.json",
+    "slice": "cargo run --release --example corpus -- corpus/out corpus/pdfprobe-results.json",
+    "slice:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/pdfprobe-results.json"
   },
   "devDependencies": {
     "unpdf": "2.1.0"

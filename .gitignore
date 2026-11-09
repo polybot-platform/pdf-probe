@@ -4,3 +4,4 @@ corpus/reference-results.json
 target/
 corpus/poppler-results.json
 corpus/pdfjs-samples/
+corpus/pdfprobe-results.json

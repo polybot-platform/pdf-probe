@@ -1,6 +1,6 @@
 // Memory of one reader inside a Bun process, by the method of chatbot-agent #1778: RSS deltas against a
 // process that has read the input but loaded no reader, after Bun.gc(true). Also after an idle wait.
-// Usage: bun run tools/rss.ts native|pdfjs <idle-seconds> <file>...
+// Usage: bun run tools/rss.ts native|wasm|pdfjs <idle-seconds> <file>...
 import { checkCurrent } from './pdfjs-reference'
 
 const [mode, idle, ...files] = process.argv.slice(2)
@@ -11,12 +11,18 @@ const base = mb()
 
 let check: (bytes: Uint8Array) => Promise<unknown> | unknown
 let close = () => {}
+let wasmMemory = () => 0
 const t0 = performance.now()
 if (mode === 'native') {
   const { loadPdfProbe } = await import('../bindings/bun')
   const probe = loadPdfProbe()
   check = (b) => probe.check(b, 10_000)
   close = probe.close
+} else if (mode === 'wasm') {
+  const { loadPdfProbeWasm } = await import('../bindings/wasm.ts')
+  const probe = loadPdfProbeWasm(await Bun.file(new URL('../target/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url).pathname).arrayBuffer())
+  check = (b) => probe.check(b, 10_000)
+  wasmMemory = () => probe.memoryBytes() / 1048576
 } else {
   const { getResolvedPDFJS } = await import('unpdf')
   await getResolvedPDFJS()
@@ -36,6 +42,6 @@ Bun.gc(true)
 const atIdle = mb()
 const r = (x: number) => +x.toFixed(1)
 console.log(
-  JSON.stringify({ mode, files: inputs.length, baseMB: r(base), loadMB: r(loaded - base), afterChecksMB: r(after - base), afterGcMB: r(afterGc - base), idleMB: r(atIdle - base), loadMs: r(loadMs), checkMsTotal: r(checkMs) }),
+  JSON.stringify({ mode, files: inputs.length, baseMB: r(base), loadMB: r(loaded - base), afterChecksMB: r(after - base), afterGcMB: r(afterGc - base), idleMB: r(atIdle - base), loadMs: r(loadMs), checkMsTotal: r(checkMs), ...(mode === 'wasm' ? { wasmLinearMemoryMB: r(wasmMemory()) } : {}) }),
 )
 close()

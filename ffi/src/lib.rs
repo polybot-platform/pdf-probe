@@ -1,6 +1,11 @@
 //! A C ABI for pdf-probe. One function does the work; the host passes the PDF bytes and a buffer, and gets
 //! the answer back in the buffer. There is no allocation across the boundary, no global state, and no way
-//! for a panic to unwind into the host: a panic becomes the `PANIC` status.
+//! for a panic to unwind into the host: a panic becomes the `PANIC` status (on native targets).
+//!
+//! On `wasm32` the host cannot hand over a pointer into its own memory, so the module also exports
+//! `pdf_probe_alloc` and `pdf_probe_free` to place bytes in its linear memory. Unwinding does not exist
+//! there: a panic aborts, which the host sees as a trap (a `WebAssembly.RuntimeError`), and the instance must
+//! be discarded.
 //!
 //! ## Result layout (little-endian)
 //!
@@ -92,6 +97,27 @@ mod abi {
     #[unsafe(no_mangle)]
     pub extern "C" fn pdf_probe_abi_version() -> u32 {
         ABI_VERSION
+    }
+
+    /// Allocates `len` zeroed bytes in the module's linear memory, for the host to fill. Only on wasm, where
+    /// the host cannot pass a pointer of its own. Free with [`pdf_probe_free`] and the same `len`.
+    #[cfg(target_arch = "wasm32")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn pdf_probe_alloc(len: usize) -> *mut u8 {
+        Box::into_raw(vec![0u8; len].into_boxed_slice()).cast::<u8>()
+    }
+
+    /// Frees a region from [`pdf_probe_alloc`].
+    ///
+    /// # Safety
+    ///
+    /// `ptr` and `len` must be exactly a pair returned by and passed to `pdf_probe_alloc`, and not freed yet.
+    #[cfg(target_arch = "wasm32")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn pdf_probe_free(ptr: *mut u8, len: usize) {
+        // SAFETY: the caller guarantees `ptr` came from `pdf_probe_alloc(len)`, which made a boxed slice of
+        // exactly `len` bytes.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
     }
 
     /// Checks one PDF. Returns the number of bytes the result needs, or a negative number for a bad argument

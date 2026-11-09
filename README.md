@@ -2,7 +2,7 @@
 
 A small, fail-closed reader that answers two questions about an untrusted PDF: **how many pages does it have, and how big is each page?** It does not render, extract text, decode images or edit anything.
 
-> **Status: all the planned parsing is in; not yet hardened. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes, and it rescans the file for objects when the cross-reference is damaged, as pdf.js does. A file it cannot read with confidence is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 983, differs on 4 by design (all four are refusals), and **gives a different answer on none**. Fuzzing has found nothing so far (see [Fuzzing](#fuzzing)). A native shared library for `bun:ffi` exists (see [Native library](#native-library)). Not yet done: a coverage-guided fuzz run, the wasm build, the npm package, and the measurement in a container. See [the status table](#status) below.
+> **Status: all the planned parsing is in; not yet hardened. Do not depend on it.** The crate reads classic and stream cross-references (hybrid files and `/Prev` chains included), object streams, Flate with PNG predictors, encryption with an empty user password (RC4, AES-128, AES-256 revisions 5 and 6), the page tree and page sizes, and it rescans the file for objects when the cross-reference is damaged, as pdf.js does. A file it cannot read with confidence is refused (`Unparseable`), never guessed at. Against pdf.js's own 987 test PDFs it gives the same answer on 983, differs on 4 by design (all four are refusals), and **gives a different answer on none**. Fuzzing has found nothing so far (see [Fuzzing](#fuzzing)). A native shared library for `bun:ffi` ([Native library](#native-library)) and a WebAssembly build ([WebAssembly](#webassembly)) exist. Not yet done: a coverage-guided fuzz run, running `wasm-opt`, the npm package, and the measurement in a container. See [the status table](#status) below.
 
 ```
 cargo test                      # unit tests
@@ -67,6 +67,28 @@ Measured on 2026-11-09, Bun 1.4.4, 20 real files (`tools/rss.ts`; RSS deltas aga
 | the 20 checks | 21 to 22 ms | 2.7 to 3.8 ms |
 
 `bun build --compile` works: a compiled binary that imports the `.so` with `{ type: 'file' }` loads it from the embedded file system and ran from a directory with no `.so` beside it. This is a local result on one machine, not the Render container: that is a Linux x86_64 glibc build made here, and the container's libc, memory limit and idle behaviour are what the adoption decision needs. The guard service's Rust FFI tokenizer once cost more than the JavaScript it replaced, so treat the table as a hypothesis confirmed locally, not as a result.
+
+### WebAssembly
+
+The same `ffi/` crate builds a wasm module: `cargo build --profile wasm --target wasm32-unknown-unknown -p pdf-probe-ffi` writes `target/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm`: **132 KB (62 KB gzipped)**, not run through `wasm-opt` (it is not installed here). It has **no imports**, so it needs no JavaScript glue and no host functions, and exports `memory` and four functions: `pdf_probe_check` (the same function and result layout as the native library), `pdf_probe_abi_version`, and, on wasm only, `pdf_probe_alloc` and `pdf_probe_free` to place bytes in its memory.
+
+`bindings/wasm.ts` is plain TypeScript over the `WebAssembly` API, and runs under Bun and under Node 24 (types stripped). `bun run wasm && bun run wasm:diff` (or `node tools/run-wasm.ts …`) runs the corpus through it: 67 identical, 1 intended, 0 unexpected on the 68 fixtures; on pdf.js's 987 test PDFs 983 identical, 4 intended, 0 unexpected, **byte-identical to the Rust-only runner on both Bun and Node**. It has not been run in a browser.
+
+Two things differ from the native library:
+
+- **A panic is a trap.** wasm32 has no unwinding, so the profile is `panic = "abort"` and a panic is a `WebAssembly.RuntimeError`. The binding catches it, discards the instance, makes a fresh one and returns the `panic` status. `tools/wasm-trap-test.ts` shows on Bun and Node that a trap is catchable and a fresh instance works afterwards; no input has been found that makes the module panic, so the binding's recovery branch itself has not run on real input.
+- **Memory only grows.** WebAssembly memory is never returned, so it sits at the high-water mark of the largest input: a full run over the 987 PDFs (the largest is 6 MB) left it at 42 MB. The binding replaces the instance when memory passes `recycleAboveBytes` (default 32 MiB), which leaves that run at 10.5 MB; the results stay byte-identical even when the threshold is low enough to replace it on every file (987 times, on Bun and Node).
+
+Measured on 2026-11-09, Bun 1.4.4, the same 20 files and method as above (`tools/rss.ts wasm`, five runs):
+
+| | pdf.js (unpdf) | pdf-probe wasm | pdf-probe native (`bun:ffi`) |
+|---|---|---|---|
+| load | +26 to +27.5 MB | +6.4 to +7.3 MB | +2.2 to +2.4 MB |
+| after 20 checks | +41 to +43 MB | +18.2 to +20.8 MB | +3.0 to +3.2 MB |
+| after 12 s idle and GC | +33 MB | +14.0 to +15.0 MB | +2.7 to +3.1 MB |
+| the 20 checks | 21 to 22 ms | 9.3 to 13.2 ms | 2.7 to 3.8 ms |
+
+The module's own memory is only 2.8 MB, so most of the wasm figure is JavaScriptCore's compiled code, as the lopdf-based wasm showed on chatbot-agent #1778. Wasm is the portable choice, not the lean one: under Bun, use the native library.
 
 ### Fuzzing
 

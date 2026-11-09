@@ -15,7 +15,9 @@
     "slice": "cargo run --release --example corpus -- corpus/out corpus/pdfprobe-results.json",
     "slice:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/pdfprobe-results.json",
     "native": "cargo build --release -p pdf-probe-ffi && bun run tools/run-native.ts corpus/out corpus/native-results.json",
-    "native:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/native-results.json"
+    "native:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/native-results.json",
+    "wasm": "cargo build --profile wasm --target wasm32-unknown-unknown -p pdf-probe-ffi && bun run tools/run-wasm.ts corpus/out corpus/wasm-results.json",
+    "wasm:diff": "bun run tools/diff-results.ts corpus/expected-pdfjs.json corpus/wasm-results.json"
   },
   "devDependencies": {
     "unpdf": "2.1.0"

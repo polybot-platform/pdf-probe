@@ -35,3 +35,10 @@ debug-assertions = true
 overflow-checks = true
 lto = false
 codegen-units = 16
+
+# For the wasm build (`cargo build --profile wasm --target wasm32-unknown-unknown -p pdf-probe-ffi`): small, and
+# `panic = "abort"`, which is the only option on wasm32-unknown-unknown (a panic becomes a trap).
+[profile.wasm]
+inherits = "release"
+panic = "abort"
+opt-level = "z"

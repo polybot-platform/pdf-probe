@@ -11,7 +11,7 @@ const probe = await createProbe() // once: loading is the expensive part
 const result = probe.check(bytes, { maxPages: 200 }) // bytes: a Uint8Array or Buffer
 
 switch (result.status) {
-  case 'ok': // result.pages, result.sizes: [[width, height], ...] in points (1/72 inch)
+  case 'ok': // result.pages, result.sizes: [[width, height], ...] in points (1/72 inch), plus version, encrypted, repaired, cropped
   case 'tooManyPages': // result.pages
   case 'empty': // well-formed, no pages
   case 'unparseable': // result.reason: damaged, unsupported or password-protected
@@ -56,6 +56,7 @@ This was tried with a binary built from the installed package and run from anoth
 - **A panic** cannot take the host down: the native library catches it at its boundary and reports `panic`; the WebAssembly engine sees a trap, discards the instance and reports `panic`. None has been found by fuzzing so far.
 - **WebAssembly memory only grows.** The WebAssembly engine replaces its instance when its memory passes `recycleAboveBytes` (default 32 MiB).
 - **Page sizes** are the effective size: MediaBox intersected with CropBox, with `/Rotate` and `/UserUnit` applied. A size limit is your policy, not the library's.
+- **Metadata on `ok`.** `version` (`'1.4'`, `'1.7'`, `'2.0'`, or `null`), `encrypted` (opened with an empty user password), `repaired` (the cross-reference was damaged and recovered by scanning), and `cropped` (at least one page's visible box is smaller than its MediaBox).
 
 ## Licence
 

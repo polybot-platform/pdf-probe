@@ -93,13 +93,22 @@ pub struct PageSize {
     pub height: f64,
 }
 
-/// The answer: the page count and every page's size.
+/// The answer: the page count, every page's size, and document metadata read along the way.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
     pub pages: usize,
     pub sizes: Vec<PageSize>,
     /// The work units this call used, out of [`Limits::max_work`]. Useful for choosing a budget.
     pub work: u64,
+    /// The effective PDF version `(major, minor)` from the `%PDF-X.Y` header or the catalog's `/Version` entry
+    /// (whichever is newer), or `None` if neither is a valid version.
+    pub version: Option<(u8, u8)>,
+    /// Whether the file has an `/Encrypt` dictionary (opened with an empty user password).
+    pub encrypted: bool,
+    /// Whether the cross-reference was missing or damaged and the file was recovered by scanning.
+    pub repaired: bool,
+    /// Whether any page's effective visible box (`MediaBox ∩ CropBox`) is smaller than its `MediaBox`.
+    pub cropped: bool,
 }
 
 /// Why no answer was given. The input is never guessed at.
@@ -371,6 +380,15 @@ impl<'a> Doc<'a> {
     }
 }
 
+fn header_version(data: &[u8]) -> Option<(u8, u8)> {
+    let v = data.strip_prefix(b"%PDF-")?;
+    if v.len() >= 3 && matches!(v[0], b'1' | b'2') && v[1] == b'.' && v[2].is_ascii_digit() {
+        Some((v[0] - b'0', v[2] - b'0'))
+    } else {
+        None
+    }
+}
+
 /// Reads the page count and page sizes of `data`.
 pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     if data.len() > limits.max_input_bytes {
@@ -383,7 +401,7 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     let data = &data[base..];
 
     let first = match xref::read(data, limits, &meter) {
-        Ok(xref) => run(data, limits, &meter, xref),
+        Ok(xref) => run(data, limits, &meter, xref, false),
         Err(failure) => {
             let recover = !is_limit_error(&failure);
             Err(Fault { failure, recover })
@@ -393,29 +411,44 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
         Ok(probe) => Ok(probe),
         Err(Fault { recover: true, .. }) => {
             let xref = recover(data, limits, &meter)?;
-            run(data, limits, &meter, xref).map_err(|fault| fault.failure)
+            run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
         }
         Err(fault) => Err(fault.failure),
     }
 }
 
-fn run(data: &[u8], limits: &Limits, meter: &Meter, xref: Xref) -> Result<Probe, Fault> {
+fn run(
+    data: &[u8],
+    limits: &Limits,
+    meter: &Meter,
+    xref: Xref,
+    repaired: bool,
+) -> Result<Probe, Fault> {
     let mut doc = Doc::new(data, xref, limits, meter);
     doc.crypto = encrypt::setup(&mut doc)?;
-    let (sizes, count) = pages::collect(&mut doc, limits.max_pages)?;
-    if sizes.len() > limits.max_pages {
+    let encrypted = doc.crypto.is_some();
+    let collected = pages::collect(&mut doc, limits.max_pages)?;
+    if collected.sizes.len() > limits.max_pages {
         return Err(Failure::TooManyPages {
-            pages: count.unwrap_or(sizes.len()),
+            pages: collected.count.unwrap_or(collected.sizes.len()),
         }
         .into());
     }
-    if sizes.is_empty() {
+    if collected.sizes.is_empty() {
         return Err(Failure::Empty.into());
     }
+    let version = match (header_version(data), collected.catalog_version) {
+        (Some(h), Some(c)) => Some(h.max(c)),
+        (h, c) => h.or(c),
+    };
     Ok(Probe {
-        pages: sizes.len(),
-        sizes,
+        pages: collected.sizes.len(),
+        sizes: collected.sizes,
         work: meter.used(),
+        version,
+        encrypted,
+        repaired,
+        cropped: collected.cropped,
     })
 }
 
@@ -554,6 +587,36 @@ mod tests {
                 height: 792.0
             }]
         );
+        assert_eq!(p.version, Some((1, 4)));
+        assert!(!p.encrypted);
+        assert!(!p.repaired);
+        assert!(!p.cropped);
+    }
+
+    #[test]
+    fn reports_catalog_version_override_repaired_and_cropped() {
+        let pdf = build(
+            &[
+                (1, "<< /Type /Catalog /Version /1.7 /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                (
+                    3,
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /CropBox [0 0 300 400] >>",
+                ),
+            ],
+            1,
+        );
+        let p = probe(&pdf, &Limits::default()).unwrap();
+        assert_eq!(p.version, Some((1, 7)));
+        assert!(!p.repaired);
+        assert!(p.cropped);
+        assert!(!p.encrypted);
+
+        let damaged = with_startxref(pdf, "999999");
+        let p_repaired = probe(&damaged, &Limits::default()).unwrap();
+        assert!(p_repaired.repaired);
+        assert!(p_repaired.cropped);
+        assert_eq!(p_repaired.version, Some((1, 7)));
     }
 
     #[test]

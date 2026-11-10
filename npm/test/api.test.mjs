@@ -19,7 +19,33 @@ const hasNative = isBun && existsSync(nativePath)
 test('reads the page count and sizes (wasm)', async () => {
   const probe = await createProbe({ engine: 'wasm' })
   assert.equal(probe.engine, 'wasm')
-  assert.deepEqual(probe.check(pdf), { status: 'ok', pages: 2, sizes: [[300, 400], [200, 100]] })
+  assert.deepEqual(probe.check(pdf), {
+    status: 'ok',
+    pages: 2,
+    sizes: [[300, 400], [200, 100]],
+    version: '1.4',
+    encrypted: false,
+    repaired: true,
+    cropped: false,
+  })
+})
+
+test('reports version, repaired, and cropped metadata', async () => {
+  const probe = await createProbe({ engine: 'wasm' })
+  const validWithXref = buildPdf([
+    [1, '<< /Type /Catalog /Version /1.7 /Pages 2 0 R >>'],
+    [2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>'],
+    [3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /CropBox [0 0 300 400] >>'],
+  ])
+  assert.deepEqual(probe.check(validWithXref), {
+    status: 'ok',
+    pages: 1,
+    sizes: [[300, 400]],
+    version: '1.7',
+    encrypted: false,
+    repaired: false,
+    cropped: true,
+  })
 })
 
 test('accepts a Buffer and an ArrayBuffer', async () => {
@@ -169,7 +195,15 @@ if (!isBun) {
   test('under Bun, the native engine gives the same answer and can be closed', { skip: !hasNative }, async () => {
     const probe = await createProbe({ engine: 'native' })
     assert.equal(probe.engine, 'native')
-    assert.deepEqual(probe.check(pdf), { status: 'ok', pages: 2, sizes: [[300, 400], [200, 100]] })
+    assert.deepEqual(probe.check(pdf), {
+      status: 'ok',
+      pages: 2,
+      sizes: [[300, 400], [200, 100]],
+      version: '1.4',
+      encrypted: false,
+      repaired: true,
+      cropped: false,
+    })
     assert.deepEqual(probe.check(pdf, { maxPages: 1 }), { status: 'tooManyPages', pages: 2 })
     probe.close()
     assert.throws(() => probe.check(pdf), /closed/)

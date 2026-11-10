@@ -3,7 +3,15 @@
 
 export type PageSize = [width: number, height: number]
 export type ProbeResult =
-  | { status: 'ok'; pages: number; sizes: PageSize[] }
+  | {
+      status: 'ok'
+      pages: number
+      sizes: PageSize[]
+      version: string | null
+      encrypted: boolean
+      repaired: boolean
+      cropped: boolean
+    }
   | { status: 'unparseable'; reason: string }
   | { status: 'empty' }
   | { status: 'tooManyPages'; pages: number }
@@ -13,7 +21,7 @@ export type ProbeResult =
 /** Which limit was hit. */
 export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed'
 
-export const ABI_VERSION = 2
+export const ABI_VERSION = 3
 export const HEADER = 16
 const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic', 'limitExceeded'] as const
 const DECODER = new TextDecoder()
@@ -30,15 +38,25 @@ export function decodeResult(buf: Uint8Array, length: number): ProbeResult {
   const status = STATUS[code]
   const pages = view.getUint32(4, true)
   const count = view.getUint32(8, true)
-  const reasonLength = view.getUint32(12, true)
-  const reason = () => DECODER.decode(buf.subarray(HEADER + 16 * count, HEADER + 16 * count + reasonLength))
+  const metaOrReason = view.getUint32(12, true)
+  const reason = () => DECODER.decode(buf.subarray(HEADER + 16 * count, HEADER + 16 * count + metaOrReason))
   switch (status) {
     case 'ok': {
       const sizes: PageSize[] = []
       for (let i = 0; i < count; i++) {
         sizes.push([view.getFloat64(HEADER + 16 * i, true), view.getFloat64(HEADER + 16 * i + 8, true)])
       }
-      return { status, pages, sizes }
+      const major = (metaOrReason >>> 8) & 0xff
+      const minor = (metaOrReason >>> 16) & 0xff
+      return {
+        status,
+        pages,
+        sizes,
+        version: major > 0 ? `${major}.${minor}` : null,
+        encrypted: (metaOrReason & 1) !== 0,
+        repaired: (metaOrReason & 2) !== 0,
+        cropped: (metaOrReason & 4) !== 0,
+      }
     }
     case 'unparseable':
     case 'panic':

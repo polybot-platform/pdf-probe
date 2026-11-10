@@ -1,0 +1,13 @@
+{
+  "name": "pdf-probe-bench",
+  "private": true,
+  "type": "module",
+  "description": "Compares chatbot-agent's checkReadablePdf (unpdf) with pdf-probe on a directory of PDFs: time, latency spread, event-loop stalls and memory. Runs anywhere Bun does, including a Render shell.",
+  "scripts": {
+    "bench": "bun run bench.ts --all"
+  },
+  "dependencies": {
+    "pdf-probe": "0.1.0",
+    "unpdf": "2.1.0"
+  }
+}

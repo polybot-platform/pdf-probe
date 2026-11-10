@@ -17,3 +17,4 @@ npm/*.tgz
 npm/LICENSE-MIT
 npm/LICENSE-APACHE
 .idea/
+bench/bench-results.json

@@ -2,7 +2,7 @@
 
 How many pages does an untrusted PDF have, and how big is each page? A small reader that answers only those two questions, and **fails closed**: a file it cannot read with confidence is reported as a failure, never guessed at. It does not render, extract text or decode images.
 
-> **Status: not published, and marked `private` so it cannot be published by accident.** The parser matches pdf.js on pdf.js's own 987 test PDFs (983 identical, 4 intended differences that are all refusals, 0 different answers), but it is young. See the [project README](https://github.com/polybot-platform/pdf-probe#readme) for the evidence and what is not done.
+> **Status: version 0.1, pre-1.0.** The parser matches pdf.js on pdf.js's own 987 test PDFs (983 identical, 4 intended differences that are all refusals, 0 different answers), but it is young, has not been independently audited, and the API may change. See the [project README](https://github.com/polybot-platform/pdf-probe#readme) for the evidence and what is not done.
 
 ```js
 import { createProbe } from 'pdf-probe'
@@ -30,9 +30,9 @@ Two engines give the same answers, byte for byte, on the whole test corpus.
 | `native` | Bun only, through `bun:ffi` | about +3 MB at idle |
 | `wasm` | Bun, Node 20+, Deno, browsers, workers (no browser run yet) | about +15 MB at idle in Bun |
 
-`createProbe()` uses `engine: 'auto'`: the native library under Bun when one is found for the platform, WebAssembly otherwise. Ask for one with `{ engine: 'native' }` or `{ engine: 'wasm' }`; `native` throws a clear error if it cannot be loaded.
+`createProbe()` uses `engine: 'auto'`: the native library under Bun when one is found, WebAssembly otherwise. **This package ships WebAssembly only**; the native library is built from the [repository](https://github.com/polybot-platform/pdf-probe) and passed in by path. Ask for one with `{ engine: 'native' }` or `{ engine: 'wasm' }`; `native` throws a clear error if it cannot be loaded.
 
-**Native libraries ship for one platform only so far** (the one the package was built on; here Linux x86_64, glibc). A release needs one per platform from CI, and the package looks for it in `native/<platform>-<arch>/`, then at `PDF_PROBE_NATIVE_LIBRARY`, then at the `nativeLibrary` option. Anywhere without one, `auto` falls back to WebAssembly.
+**No native library is included.** Build one with `cargo build --release -p pdf-probe-ffi` and give its path with the `nativeLibrary` option or `PDF_PROBE_NATIVE_LIBRARY`; the package also looks in `native/<platform>-<arch>/` next to itself. Anywhere without one, `auto` uses WebAssembly.
 
 ## `bun build --compile`
 
@@ -41,12 +41,10 @@ A compiled binary has no `node_modules` on disk, so embed the engine files and p
 ```js
 import { createProbe } from 'pdf-probe'
 import wasmFile from 'pdf-probe/pdf_probe.wasm' with { type: 'file' }
-import nativeFile from 'pdf-probe/native/linux-x64/libpdf_probe_ffi.so' with { type: 'file' }
-
-const probe = await createProbe({ nativeLibrary: nativeFile, wasm: wasmFile })
+const probe = await createProbe({ wasm: wasmFile })
 ```
 
-With both given, `auto` uses the native library and falls back to WebAssembly if it cannot be loaded. This was tried with a binary built from the installed package and run from another directory.
+This was tried with a binary built from the installed package and run from another directory. A native library you built yourself can be embedded the same way and passed as `nativeLibrary`.
 
 ## Things to know
 

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (format, lint, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --release -- -D warnings
+      - run: cargo test --workspace --release
+
+  # The differential test: the same page counts, sizes and verdicts as pdf.js on the generated fixtures, then
+  # the same through the native library, the wasm module and the npm package, on Node and Bun.
+  fixtures:
+    name: Fixtures vs pdf.js, native, wasm, npm package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Ghostscript makes the gs-* fixtures. expected-pdfjs.json was made with 10.02, which Ubuntu 24.04 ships.
+      - run: sudo apt-get update && sudo apt-get install -y ghostscript
+      - run: bun install --frozen-lockfile
+      - run: bun run corpus
+      - run: bun run slice && bun run slice:diff
+      - run: bun run npm:test
+      - name: Mutation fuzzer, 30 seconds (a smoke test; the long runs are local)
+        run: cargo run --profile fuzz --example fuzz -- --seeds corpus/out --seconds 30 --rng 1
+
+  # pdf.js's own test PDFs, fetched at a pinned commit and never stored in this repository. pdf.js is run over
+  # them for the reference answers, so this is slower than the other jobs.
+  samples:
+    name: pdf.js test PDFs vs pdf.js
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run samples
+      - run: bun run samples:reference
+      - run: cargo run --release --example corpus -- corpus/pdfjs-samples/repo/test/pdfs corpus/pdfjs-samples/pdfprobe-results.json
+      - run: bun run tools/diff-results.ts corpus/pdfjs-samples/reference-results.json corpus/pdfjs-samples/pdfprobe-results.json

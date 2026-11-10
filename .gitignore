@@ -16,3 +16,4 @@ npm/native/
 npm/*.tgz
 npm/LICENSE-MIT
 npm/LICENSE-APACHE
+.idea/

@@ -14,7 +14,7 @@
 //! | 0 | u32 | status: 0 ok, 1 unparseable, 2 empty, 3 too many pages, 4 internal error (a panic), 5 limit exceeded |
 //! | 4 | u32 | page count (status 0 and 3), else 0 |
 //! | 8 | u32 | number of page sizes that follow (status 0), else 0 |
-//! | 12 | u32 | length of the reason text, in bytes |
+//! | 12 | u32 | status 0: packed metadata (`bit 0` encrypted, `bit 1` repaired, `bit 2` cropped, `bits 8..16` version major, `bits 16..24` version minor); other statuses: length of the reason text, in bytes |
 //! | 16 | f64 x 2 each | width and height of each page in points |
 //! | after | bytes | the reason, UTF-8 (status 1 and 4), else empty; for status 5 the name of the limit: `inputBytes`, `work`, `objects`, `xrefSections` or `decompressed` |
 //!
@@ -32,7 +32,7 @@ use pdf_probe::{Failure, Limits, Probe, probe};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Bumped when the result layout or the function signature changes.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_UNPARSEABLE: u32 = 1;
@@ -41,19 +41,40 @@ pub const STATUS_TOO_MANY_PAGES: u32 = 3;
 pub const STATUS_PANIC: u32 = 4;
 pub const STATUS_LIMIT_EXCEEDED: u32 = 5;
 
+pub const FLAG_ENCRYPTED: u32 = 1 << 0;
+pub const FLAG_REPAIRED: u32 = 1 << 1;
+pub const FLAG_CROPPED: u32 = 1 << 2;
+
 /// The size of the fixed header.
 pub const HEADER: usize = 16;
 
 /// More pages than this is never requested: it bounds the output buffer a host has to allocate.
 const MAX_PAGES_CEILING: u32 = 1_000_000;
 
-fn header(status: u32, pages: usize, sizes: usize, reason: usize) -> Vec<u8> {
+fn header(status: u32, pages: usize, sizes: usize, meta_or_reason: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER);
     out.extend_from_slice(&status.to_le_bytes());
-    for v in [pages, sizes, reason] {
+    for v in [pages, sizes, meta_or_reason] {
         out.extend_from_slice(&u32::try_from(v).unwrap_or(u32::MAX).to_le_bytes());
     }
     out
+}
+
+fn pack_meta(p: &Probe) -> usize {
+    let mut flags = 0u32;
+    if p.encrypted {
+        flags |= FLAG_ENCRYPTED;
+    }
+    if p.repaired {
+        flags |= FLAG_REPAIRED;
+    }
+    if p.cropped {
+        flags |= FLAG_CROPPED;
+    }
+    if let Some((major, minor)) = p.version {
+        flags |= (u32::from(major) << 8) | (u32::from(minor) << 16);
+    }
+    flags as usize
 }
 
 fn with_reason(status: u32, pages: usize, reason: &str) -> Vec<u8> {
@@ -66,7 +87,7 @@ fn with_reason(status: u32, pages: usize, reason: &str) -> Vec<u8> {
 pub fn encode(outcome: std::thread::Result<Result<Probe, Failure>>) -> Vec<u8> {
     match outcome {
         Ok(Ok(p)) => {
-            let mut out = header(STATUS_OK, p.pages, p.sizes.len(), 0);
+            let mut out = header(STATUS_OK, p.pages, p.sizes.len(), pack_meta(&p));
             for s in &p.sizes {
                 out.extend_from_slice(&s.width.to_le_bytes());
                 out.extend_from_slice(&s.height.to_le_bytes());
@@ -211,12 +232,17 @@ mod tests {
                     height: 200.25,
                 },
             ],
+            version: Some((1, 7)),
+            encrypted: true,
+            repaired: false,
+            cropped: true,
         };
         let b = encode(Ok(Ok(probe)));
         assert_eq!(b.len(), HEADER + 2 * 16);
+        let expected_meta = FLAG_ENCRYPTED | FLAG_CROPPED | (1 << 8) | (7 << 16);
         assert_eq!(
             [u32_at(&b, 0), u32_at(&b, 4), u32_at(&b, 8), u32_at(&b, 12)],
-            [STATUS_OK, 2, 2, 0]
+            [STATUS_OK, 2, 2, expected_meta]
         );
         assert_eq!((f64_at(&b, 16), f64_at(&b, 24)), (612.0, 792.0));
         assert_eq!((f64_at(&b, 32), f64_at(&b, 40)), (100.5, 200.25));

@@ -1,7 +1,19 @@
 export type PageSize = [width: number, height: number]
 
 export type ProbeResult =
-  | { status: 'ok'; pages: number; sizes: PageSize[] }
+  | {
+      status: 'ok'
+      pages: number
+      sizes: PageSize[]
+      /** The effective PDF version (`'1.4'`, `'1.7'`, `'2.0'`, etc.), or `null` if none was found. */
+      version: string | null
+      /** Whether the file has an `/Encrypt` dictionary (opened with an empty user password). */
+      encrypted: boolean
+      /** Whether the cross-reference was missing or damaged and the file was recovered by scanning. */
+      repaired: boolean
+      /** Whether any page's effective visible box (`MediaBox ∩ CropBox`) is smaller than its `MediaBox`. */
+      cropped: boolean
+    }
   | { status: 'unparseable'; reason: string }
   | { status: 'empty' }
   | { status: 'tooManyPages'; pages: number }

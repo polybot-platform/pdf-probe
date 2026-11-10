@@ -37,8 +37,23 @@ struct Inherit {
     rotate: Option<Obj>,
 }
 
+pub(crate) struct Collected {
+    pub sizes: Vec<PageSize>,
+    pub count: Option<usize>,
+    pub catalog_version: Option<(u8, u8)>,
+    pub cropped: bool,
+}
+
+fn parse_version(b: &[u8]) -> Option<(u8, u8)> {
+    if b.len() == 3 && matches!(b[0], b'1' | b'2') && b[1] == b'.' && b[2].is_ascii_digit() {
+        Some((b[0] - b'0', b[2] - b'0'))
+    } else {
+        None
+    }
+}
+
 /// Walks the tree in document order and returns up to `want` page sizes.
-pub(crate) fn collect(doc: &mut Doc, cap: usize) -> Result<(Vec<PageSize>, Option<usize>), Fault> {
+pub(crate) fn collect(doc: &mut Doc, cap: usize) -> Result<Collected, Fault> {
     let root_obj = doc
         .xref
         .trailer
@@ -53,6 +68,13 @@ pub(crate) fn collect(doc: &mut Doc, cap: usize) -> Result<(Vec<PageSize>, Optio
             )));
         }
         Err(f) => return Err(rescan(f)),
+    };
+    let catalog_version = match catalog.get(b"Version").cloned() {
+        Some(v) => doc.resolve(&v).ok().and_then(|o| match o {
+            Obj::Name(n) => parse_version(&n),
+            _ => None,
+        }),
+        None => None,
     };
     let Some(pages_obj) = catalog.get(b"Pages").cloned() else {
         return Err(rescan(Failure::Unparseable("the catalog has no /Pages")));
@@ -84,6 +106,7 @@ pub(crate) fn collect(doc: &mut Doc, cap: usize) -> Result<(Vec<PageSize>, Optio
     // Never read more than one page past the cap: that is enough to know the cap was exceeded.
     let limit = count.unwrap_or(usize::MAX).min(cap.saturating_add(1));
     let mut out = Vec::new();
+    let mut cropped = false;
     let mut path: Vec<u32> = root_num.into_iter().collect();
     let last = count.map(|c| c.saturating_sub(1));
     walk(
@@ -93,11 +116,18 @@ pub(crate) fn collect(doc: &mut Doc, cap: usize) -> Result<(Vec<PageSize>, Optio
         0,
         &mut path,
         &mut out,
+        &mut cropped,
         (limit, last),
     )?;
-    Ok((out, count))
+    Ok(Collected {
+        sizes: out,
+        count,
+        catalog_version,
+        cropped,
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     doc: &mut Doc,
     node: &Dict,
@@ -105,6 +135,7 @@ fn walk(
     depth: usize,
     path: &mut Vec<u32>,
     out: &mut Vec<PageSize>,
+    cropped: &mut bool,
     (limit, last): (usize, Option<usize>),
 ) -> Result<(), Fault> {
     if out.len() >= limit {
@@ -115,7 +146,9 @@ fn walk(
     }
     let Some(kids) = node.get(b"Kids").cloned() else {
         // No /Kids: this node is a page.
-        out.push(page_size(doc, node, inherit)?);
+        let (size, page_cropped) = page_size(doc, node, inherit)?;
+        *cropped |= page_cropped;
+        out.push(size);
         return Ok(());
     };
     let kids = doc
@@ -149,10 +182,28 @@ fn walk(
                     return fail("a page tree kid is not a dictionary");
                 };
                 path.push(*n);
-                walk(doc, &child, &here, depth + 1, path, out, (limit, last))?;
+                walk(
+                    doc,
+                    &child,
+                    &here,
+                    depth + 1,
+                    path,
+                    out,
+                    cropped,
+                    (limit, last),
+                )?;
                 path.pop();
             }
-            Obj::Dict(child) => walk(doc, child, &here, depth + 1, path, out, (limit, last))?,
+            Obj::Dict(child) => walk(
+                doc,
+                child,
+                &here,
+                depth + 1,
+                path,
+                out,
+                cropped,
+                (limit, last),
+            )?,
             _ => return fail("a page tree kid is not a reference"),
         }
     }
@@ -193,7 +244,7 @@ fn number(doc: &mut Doc, obj: Option<&Obj>) -> Result<Option<f64>, Failure> {
     }
 }
 
-fn page_size(doc: &mut Doc, page: &Dict, inherit: &Inherit) -> Result<PageSize, Failure> {
+fn page_size(doc: &mut Doc, page: &Dict, inherit: &Inherit) -> Result<(PageSize, bool), Failure> {
     let own_or =
         |key: &[u8], inherited: &Option<Obj>| page.get(key).cloned().or_else(|| inherited.clone());
     // A missing or invalid MediaBox is US Letter, as in pdf.js.
@@ -217,6 +268,7 @@ fn page_size(doc: &mut Doc, page: &Dict, inherit: &Inherit) -> Result<PageSize, 
             media
         }
     };
+    let cropped = view != media;
     let rotate = match number(doc, own_or(b"Rotate", &inherit.rotate).as_ref())? {
         Some(r) if r.fract() == 0.0 && r.abs() < 1.0e9 && (r as i64) % 90 == 0 => {
             ((r as i64 % 360) + 360) % 360
@@ -231,5 +283,5 @@ fn page_size(doc: &mut Doc, page: &Dict, inherit: &Inherit) -> Result<PageSize, 
     if rotate == 90 || rotate == 270 {
         std::mem::swap(&mut width, &mut height);
     }
-    Ok(PageSize { width, height })
+    Ok((PageSize { width, height }, cropped))
 }

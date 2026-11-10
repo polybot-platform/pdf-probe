@@ -11,7 +11,11 @@ switch (result.status) {
   case 'ok': {
     const [width, height]: [number, number] = result.sizes[0]
     const pages: number = result.pages
-    void [width, height, pages]
+    const version: string | null = result.version
+    const encrypted: boolean = result.encrypted
+    const repaired: boolean = result.repaired
+    const cropped: boolean = result.cropped
+    void [width, height, pages, version, encrypted, repaired, cropped]
     break
   }
   case 'unparseable':

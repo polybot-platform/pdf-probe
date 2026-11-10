@@ -35,6 +35,19 @@ container's cgroup limits are printed in the header: on a laptop on `powersave`,
 `corpus/pdfjs-samples/repo/test/pdfs` (not redistributable, never commit them). Real office-style documents (reports,
 invoices, slide exports, scans) of your own make a better test of what a sync would see.
 
+## Without Render: a local container with the same limits
+
+If the Render container cannot be used, a Docker container with the same cgroup limits is the closest stand-in (same
+Linux limits, a Bun image of the version you pick; not Render's hardware or its neighbours):
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" --memory 512m --memory-swap 512m --cpus 0.5 \
+  -v "$PWD:/work/bench" -v "<directory of PDFs>:/work/pdfs:ro" -w /work/bench oven/bun:1.4.4-debian \
+  bun run bench.ts --all --dir /work/pdfs --limit 300 --concurrency 1,8
+```
+
+The header then shows the container's `cpu.max` and `memory.max`. Run `bun install` in this directory first.
+
 ## In the Render staging container
 
 The reason to run it there is the 0.5 CPU share and the 512 MB limit, which a workstation does not have. **Staging

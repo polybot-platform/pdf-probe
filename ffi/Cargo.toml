@@ -1,6 +1,6 @@
 [package]
 name = "pdf-probe-ffi"
-version = "0.0.0"
+version = "0.2.0"
 edition = "2024"
 description = "A C ABI for pdf-probe, to load from Bun (bun:ffi) or any host that can call a shared library."
 license = "MIT OR Apache-2.0"

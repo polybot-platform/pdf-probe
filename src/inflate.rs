@@ -61,7 +61,7 @@ impl Reader<'_> {
         Ok(v)
     }
 
-    fn decode(&mut self, h: &Huffman) -> Res<u16> {
+    fn decode<const N: usize>(&mut self, h: &Huffman<N>) -> Res<u16> {
         let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
         for len in 1..16 {
             code |= self.bits(1)? as i32;
@@ -82,40 +82,71 @@ impl Reader<'_> {
     }
 }
 
-struct Huffman {
+struct Huffman<const N: usize> {
     count: [u16; 16],
-    symbol: Vec<u16>,
+    symbol: [u16; N],
 }
 
 /// A canonical Huffman code from code lengths (each at most 15). Over-subscribed codes are rejected.
-fn build(lengths: &[u8]) -> Res<Huffman> {
+const fn build<const N: usize>(lengths: &[u8]) -> Res<Huffman<N>> {
     let mut count = [0u16; 16];
-    for &l in lengths {
-        count[usize::from(l)] += 1;
+    let mut i = 0;
+    while i < lengths.len() {
+        count[lengths[i] as usize] += 1;
+        i += 1;
     }
     count[0] = 0;
     let mut left = 1i32;
-    for c in &count[1..] {
+    let mut len = 1;
+    while len < 16 {
         left <<= 1;
-        left -= i32::from(*c);
+        left -= count[len] as i32;
         if left < 0 {
             return Err("over-subscribed huffman code");
         }
+        len += 1;
     }
     let mut offs = [0u16; 16];
-    for len in 1..15 {
+    let mut len = 1;
+    while len < 15 {
         offs[len + 1] = offs[len] + count[len];
+        len += 1;
     }
-    let mut symbol = vec![0u16; lengths.len()];
-    for (sym, &l) in lengths.iter().enumerate() {
+    let mut symbol = [0u16; N];
+    let mut sym = 0;
+    while sym < lengths.len() {
+        let l = lengths[sym];
         if l != 0 {
-            let slot = &mut offs[usize::from(l)];
-            symbol[usize::from(*slot)] = sym as u16;
-            *slot += 1;
+            let slot = offs[l as usize] as usize;
+            symbol[slot] = sym as u16;
+            offs[l as usize] += 1;
         }
+        sym += 1;
     }
     Ok(Huffman { count, symbol })
 }
+
+const FIXED_LIT: Huffman<288> = {
+    let mut lengths = [8u8; 288];
+    let mut i = 144;
+    while i < 256 {
+        lengths[i] = 9;
+        i += 1;
+    }
+    while i < 280 {
+        lengths[i] = 7;
+        i += 1;
+    }
+    match build(&lengths) {
+        Ok(h) => h,
+        Err(_) => unreachable!(),
+    }
+};
+
+const FIXED_DIST: Huffman<30> = match build(&[5u8; 30]) {
+    Ok(h) => h,
+    Err(_) => unreachable!(),
+};
 
 pub(crate) fn inflate(input: &[u8], max_out: usize) -> Res<Vec<u8>> {
     let mut r = Reader {
@@ -125,17 +156,18 @@ pub(crate) fn inflate(input: &[u8], max_out: usize) -> Res<Vec<u8>> {
         bitcnt: 0,
     };
     let mut out: Vec<u8> = Vec::new();
+    let max_blocks = (input.len() / 2).max(64);
+    let mut blocks = 0usize;
     loop {
+        blocks += 1;
+        if blocks > max_blocks {
+            return Err("too many deflate blocks");
+        }
         let last = r.bits(1)?;
         match r.bits(2)? {
             0 => stored(&mut r, &mut out, max_out)?,
             1 => {
-                let mut lengths = [8u8; 288];
-                lengths[144..256].fill(9);
-                lengths[256..280].fill(7);
-                let lit = build(&lengths)?;
-                let dist = build(&[5u8; 30])?;
-                codes(&mut r, &mut out, &lit, &dist, max_out)?;
+                codes(&mut r, &mut out, &FIXED_LIT, &FIXED_DIST, max_out)?;
             }
             2 => {
                 let (lit, dist) = dynamic_tables(&mut r)?;
@@ -174,7 +206,7 @@ fn stored(r: &mut Reader, out: &mut Vec<u8>, max_out: usize) -> Res<()> {
     Ok(())
 }
 
-fn dynamic_tables(r: &mut Reader) -> Res<(Huffman, Huffman)> {
+fn dynamic_tables(r: &mut Reader) -> Res<(Huffman<288>, Huffman<30>)> {
     let nlen = r.bits(5)? as usize + 257;
     let ndist = r.bits(5)? as usize + 1;
     let ncode = r.bits(4)? as usize + 4;
@@ -185,7 +217,7 @@ fn dynamic_tables(r: &mut Reader) -> Res<(Huffman, Huffman)> {
     for &slot in CLORDER.iter().take(ncode) {
         cl[slot] = r.bits(3)? as u8;
     }
-    let lencode = build(&cl)?;
+    let lencode = build::<19>(&cl)?;
     let mut lengths = [0u8; 316];
     let total = nlen + ndist;
     let mut i = 0;
@@ -219,11 +251,11 @@ fn dynamic_tables(r: &mut Reader) -> Res<(Huffman, Huffman)> {
     Ok((build(&lengths[..nlen])?, build(&lengths[nlen..total])?))
 }
 
-fn codes(
+fn codes<const L: usize, const D: usize>(
     r: &mut Reader,
     out: &mut Vec<u8>,
-    lit: &Huffman,
-    dist: &Huffman,
+    lit: &Huffman<L>,
+    dist: &Huffman<D>,
     max_out: usize,
 ) -> Res<()> {
     loop {

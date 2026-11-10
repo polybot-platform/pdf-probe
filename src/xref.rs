@@ -75,6 +75,7 @@ pub(crate) fn read(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, 
         // With no usable section at all, the caller falls back to the recovery scan.
         let (section, trailer) = match read_section(data, offset, limits, &mut decoded, meter) {
             Ok(read) => read,
+            Err(e @ Failure::LimitExceeded(_)) => return Err(e),
             Err(e) if newest.is_none() => return Err(e),
             Err(_) => break,
         };
@@ -186,13 +187,16 @@ fn read_xref_stream(
     decoded: &mut usize,
     meter: &Meter,
 ) -> Result<(Section, Dict), Failure> {
-    let Some(ind) = Lexer::new(data, offset).parse_indirect_full() else {
+    let mut lx = Lexer::new(data, offset);
+    let parsed = lx.parse_indirect_full();
+    meter.charge(cost::SCAN * (lx.pos() - offset) as u64)?;
+    let Some(ind) = parsed else {
         return fail("unreadable cross-reference");
     };
     let (Obj::Dict(dict), Some(range)) = (ind.obj, ind.stream) else {
         return fail("not a cross-reference stream");
     };
-    meter.charge(cost::SCAN * (range.end - offset) as u64)?;
+    meter.charge(cost::SCAN * range.end.saturating_sub(lx.pos()) as u64)?;
     if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n == b"XRef") {
         return fail("not a cross-reference stream");
     }
@@ -436,7 +440,9 @@ pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, 
                 Some(_) if gens.get(&num) == Some(&gen_) => {
                     // Do not let a later copy that fails at once replace a good one (pdf.js issue13783).
                     let mut lx = Lexer::new(data, start);
-                    lx.parse_obj().is_some() || lx.pos() < n
+                    let parsed = lx.parse_obj();
+                    meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
+                    parsed.is_some()
                 }
                 Some(_) => false,
             };
@@ -487,32 +493,34 @@ pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, 
             if !seen.insert(at) || seen.len() > limits.max_xref_sections {
                 continue;
             }
-            let Ok((section, dict)) = read_section(data, at, limits, &mut decoded, meter) else {
-                continue;
-            };
-            for (num, entry) in section {
-                if entries.len() < limits.max_objects || entries.contains_key(&num) {
-                    entries.entry(num).or_insert(entry);
+            match read_section(data, at, limits, &mut decoded, meter) {
+                Ok((section, dict)) => {
+                    for (num, entry) in section {
+                        if entries.len() < limits.max_objects || entries.contains_key(&num) {
+                            entries.entry(num).or_insert(entry);
+                        }
+                    }
+                    queue.extend(prev_offset(&dict));
+                    top.get_or_insert(dict);
                 }
+                Err(e @ Failure::LimitExceeded(_)) => return Err(e),
+                Err(_) => continue,
             }
-            queue.extend(prev_offset(&dict));
-            top.get_or_insert(dict);
         }
     }
 
-    let trailers = trailer_at
-        .into_iter()
-        .filter_map(|at| {
-            let mut lx = Lexer::new(data, at);
-            if !lx.eat_keyword(b"trailer") {
-                return None;
-            }
-            match lx.parse_obj() {
-                Some(Obj::Dict(d)) => Some(d),
-                _ => None,
-            }
-        })
-        .collect();
+    let mut trailers = Vec::new();
+    for at in trailer_at {
+        let mut lx = Lexer::new(data, at);
+        if !lx.eat_keyword(b"trailer") {
+            continue;
+        }
+        let parsed = lx.parse_obj();
+        meter.charge(cost::PARSE * (lx.pos() - at) as u64)?;
+        if let Some(Obj::Dict(d)) = parsed {
+            trailers.push(d);
+        }
+    }
     Ok(Scan {
         entries,
         trailers,

@@ -379,9 +379,10 @@ impl<'a> Lexer<'a> {
             return Some(start..end);
         }
         let key = b"endstream";
-        let rel = self.data[start..]
-            .windows(key.len())
-            .position(|w| w == key)?;
+        let Some(rel) = self.data[start..].windows(key.len()).position(|w| w == key) else {
+            self.pos = self.data.len();
+            return None;
+        };
         let mut end = start + rel;
         if end > start && self.data[end - 1] == b'\n' {
             end -= 1;

@@ -93,10 +93,21 @@ fn predict(parms: &Dict, data: Vec<u8>, meter: &Meter) -> Res<Vec<u8>> {
         return bad("bad predictor parameters");
     }
     meter.charge(cost::PREDICT * data.len() as u64)?;
-    let (colors, bpc, columns) = (colors as usize, bpc as usize, columns as usize);
-    let bpp = (colors * bpc).div_ceil(8);
-    let row = (colors * bpc * columns).div_ceil(8);
-    let stride = row + 1;
+    let bits_per_pixel = (colors as u64) * (bpc as u64);
+    let bpp = bits_per_pixel.div_ceil(8) as usize;
+    let row_u64 = bits_per_pixel
+        .checked_mul(columns as u64)
+        .ok_or(Failure::Unparseable("bad predictor parameters"))?
+        .div_ceil(8);
+    let Ok(row) = usize::try_from(row_u64) else {
+        return bad("bad predictor parameters");
+    };
+    let Some(stride) = row.checked_add(1) else {
+        return bad("bad predictor parameters");
+    };
+    if data.len() < stride {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::with_capacity(data.len() / stride * row);
     let mut prev = vec![0u8; row];
     let mut cur = vec![0u8; row];

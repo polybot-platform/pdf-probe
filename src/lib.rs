@@ -190,7 +190,13 @@ impl Doc<'_> {
             .get(index as usize)
             .copied()
             .filter(|(n, _)| *n == num);
-        let found = listed.or_else(|| stm.index.iter().copied().find(|(n, _)| *n == num));
+        let found = match listed {
+            Some(entry) => Some(entry),
+            None => {
+                self.meter.charge(stm.index.len() as u64)?;
+                stm.index.iter().copied().find(|(n, _)| *n == num)
+            }
+        };
         let Some((_, rel)) = found else {
             return Err(Failure::Unparseable(
                 "object missing from its object stream",
@@ -415,17 +421,34 @@ fn run(data: &[u8], limits: &Limits, meter: &Meter, xref: Xref) -> Result<Probe,
 
 /// Whether a trailer is usable, as pdf.js judges it while rescanning: `/Root` and its `/Pages` must be
 /// dictionaries. `Some(true)` when `/Count` is also an integer.
-fn trailer_candidate(doc: &mut Doc, trailer: &lexer::Dict) -> Option<bool> {
-    let root = trailer.get(b"Root")?.clone();
-    let Ok(Obj::Dict(root)) = doc.resolve(&root) else {
-        return None;
+fn trailer_candidate(doc: &mut Doc, trailer: &lexer::Dict) -> Result<Option<bool>, Failure> {
+    let Some(root) = trailer.get(b"Root").cloned() else {
+        return Ok(None);
     };
-    let pages = root.get(b"Pages")?.clone();
-    let Ok(Obj::Dict(pages)) = doc.resolve(&pages) else {
-        return None;
+    let root = match doc.resolve(&root) {
+        Ok(Obj::Dict(root)) => root,
+        Ok(_) => return Ok(None),
+        Err(e @ Failure::LimitExceeded(_)) => return Err(e),
+        Err(_) => return Ok(None),
     };
-    let count = pages.get(b"Count").cloned();
-    Some(count.is_some_and(|c| doc.resolve(&c).ok().and_then(|o| o.as_int()).is_some()))
+    let Some(pages) = root.get(b"Pages").cloned() else {
+        return Ok(None);
+    };
+    let pages = match doc.resolve(&pages) {
+        Ok(Obj::Dict(pages)) => pages,
+        Ok(_) => return Ok(None),
+        Err(e @ Failure::LimitExceeded(_)) => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    let count = match pages.get(b"Count").cloned() {
+        Some(c) => match doc.resolve(&c) {
+            Ok(o) => o.as_int().is_some(),
+            Err(e @ Failure::LimitExceeded(_)) => return Err(e),
+            Err(_) => false,
+        },
+        None => false,
+    };
+    Ok(Some(count))
 }
 
 /// Rebuilds the cross-reference by scanning the file, and picks the trailer the way pdf.js does: the first
@@ -447,7 +470,7 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
     let mut candidate = None;
     let mut chosen = None;
     for trailer in &scan.trailers {
-        let Some(valid_pages) = trailer_candidate(&mut doc, trailer) else {
+        let Some(valid_pages) = trailer_candidate(&mut doc, trailer)? else {
             continue;
         };
         if valid_pages
@@ -464,11 +487,13 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
         let mut nums: Vec<u32> = doc.xref.entries.keys().copied().collect();
         nums.sort_unstable();
         for num in nums.into_iter().take(limits.max_objects) {
-            if let Ok(Obj::Dict(d)) = doc.fetch(num)
-                && d.get(b"Root").is_some()
-            {
-                trailer = Some(d);
-                break;
+            match doc.fetch(num) {
+                Ok(Obj::Dict(d)) if d.get(b"Root").is_some() => {
+                    trailer = Some(d);
+                    break;
+                }
+                Err(e @ Failure::LimitExceeded(_)) => return Err(e),
+                _ => {}
             }
         }
     }
@@ -908,5 +933,139 @@ mod tests {
     fn garbage_and_empty_input_fail_closed() {
         assert!(probe(b"", &Limits::default()).is_err());
         assert!(probe(b"not a pdf at all", &Limits::default()).is_err());
+    }
+
+    #[test]
+    fn a_predictor_with_a_huge_row_does_not_overflow_or_allocate_for_short_data() {
+        let z = stored_zlib(&[0]);
+        let mut pdf = b"%PDF-1.5\n".to_vec();
+        let at = pdf.len();
+        pdf.extend(
+            format!(
+                "1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Filter /FlateDecode \
+                 /DecodeParms << /Predictor 12 /Colors 64 /BitsPerComponent 16 /Columns {} >> \
+                 /Length {} >>\nstream\n",
+                1 << 24,
+                z.len()
+            )
+            .bytes(),
+        );
+        pdf.extend(z);
+        pdf.extend(format!("\nendstream\nendobj\nstartxref\n{at}\n%%EOF\n").bytes());
+        assert!(probe(&pdf, &Limits::default()).is_err());
+    }
+
+    #[test]
+    fn empty_deflate_blocks_are_bounded() {
+        let mut bits = Vec::new();
+        let mut acc = 0u32;
+        let mut n = 0u32;
+        let mut put = |v: u32, width: u32| {
+            for i in 0..width {
+                acc |= ((v >> i) & 1) << n;
+                n += 1;
+                if n == 8 {
+                    bits.push(acc as u8);
+                    acc = 0;
+                    n = 0;
+                }
+            }
+        };
+        for _ in 0..1000 {
+            put(0, 1);
+            put(1, 2);
+            put(0, 7);
+        }
+        put(1, 1);
+        put(1, 2);
+        put(0, 7);
+        put(0, 7);
+        let mut z = vec![0x78, 0x01];
+        z.extend(bits);
+        assert_eq!(inflate::zlib(&z, 1024), Err("too many deflate blocks"));
+    }
+
+    #[test]
+    fn repeated_unterminated_objects_and_trailers_in_recovery_scan_hit_the_work_budget() {
+        let mut dup = b"%PDF-1.4\n".to_vec();
+        for _ in 0..2000 {
+            dup.extend(b"1 0 obj\n(\n");
+        }
+        let tight = Limits {
+            max_work: 500_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&dup, &tight),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
+
+        let mut trailers = b"%PDF-1.4\n".to_vec();
+        for _ in 0..2000 {
+            trailers.extend(b"trailer<</A(\n1 0 obj\nendobj\n");
+        }
+        assert_eq!(
+            probe(&trailers, &tight),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
+    }
+
+    #[test]
+    fn object_stream_fallback_search_charges_the_work_budget() {
+        let mut pdf = b"%PDF-1.5\n".to_vec();
+        let cat = pdf.len();
+        pdf.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let pages = pdf.len();
+        let kids = "3 0 R ".repeat(500);
+        pdf.extend(
+            format!("2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count 500 >>\nendobj\n").bytes(),
+        );
+        let m = 2000usize;
+        let mut header = "5 0 ".repeat(m - 1);
+        header.push_str("3 0 ");
+        let body = "<< /Type /Page /MediaBox [0 0 100 100] >>";
+        let data = format!("{header}{body}");
+        let stm = pdf.len();
+        pdf.extend(
+            format!(
+                "4 0 obj\n<< /Type /ObjStm /N {m} /First {} /Length {} >>\nstream\n{data}\nendstream\nendobj\n",
+                header.len(),
+                data.len()
+            )
+            .bytes(),
+        );
+        let xs = pdf.len();
+        let row = |t: u8, a: usize, b: u32| {
+            let mut r = vec![t];
+            r.extend(&(a as u32).to_be_bytes());
+            r.extend(&b.to_be_bytes());
+            r
+        };
+        let rows: Vec<u8> = [
+            row(0, 0, 0),
+            row(1, cat, 0),
+            row(1, pages, 0),
+            row(2, 4, 999_999),
+            row(1, stm, 0),
+            row(1, xs, 0),
+        ]
+        .concat();
+        pdf.extend(
+            format!(
+                "6 0 obj\n<< /Type /XRef /Size 6 /W [1 4 4] /Root 1 0 R /Length {} >>\nstream\n",
+                rows.len()
+            )
+            .bytes(),
+        );
+        pdf.extend(rows);
+        pdf.extend(format!("\nendstream\nendobj\nstartxref\n{xs}\n%%EOF\n").bytes());
+        let tight = Limits {
+            max_work: 500_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &tight),
+            Err(Failure::LimitExceeded(Limit::Work))
+        );
     }
 }

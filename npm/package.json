@@ -1,7 +1,7 @@
 {
   "name": "pdf-probe",
-  "version": "0.1.0",
-  "description": "A small, fail-closed reader that answers two questions about an untrusted PDF: how many pages, and how big is each page? WebAssembly, for Node, Bun and browsers.",
+  "version": "0.2.0",
+  "description": "A small, fail-closed reader for untrusted PDFs: page count, effective page sizes, and structural flags. WebAssembly and native FFI for Node, Bun, and browsers.",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",

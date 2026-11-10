@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "pdf-probe"
-version = "0.0.0"
+version = "0.2.0"
 
 [[package]]
 name = "pdf-probe-ffi"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "pdf-probe",
 ]

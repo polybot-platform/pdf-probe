@@ -16,6 +16,7 @@ export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'de
 export const ABI_VERSION = 2
 export const HEADER = 16
 const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic', 'limitExceeded'] as const
+const DECODER = new TextDecoder()
 
 /** The buffer size that fits any answer for a page cap, so a retry is rarely needed. */
 export function bufferSizeFor(maxPages: number): number {
@@ -30,8 +31,7 @@ export function decodeResult(buf: Uint8Array, length: number): ProbeResult {
   const pages = view.getUint32(4, true)
   const count = view.getUint32(8, true)
   const reasonLength = view.getUint32(12, true)
-  const reason = () =>
-    new TextDecoder().decode(buf.subarray(HEADER + 16 * count, HEADER + 16 * count + reasonLength))
+  const reason = () => DECODER.decode(buf.subarray(HEADER + 16 * count, HEADER + 16 * count + reasonLength))
   switch (status) {
     case 'ok': {
       const sizes: PageSize[] = []

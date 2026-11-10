@@ -23,7 +23,7 @@ unsafe_code = "forbid"
 [profile.release]
 lto = true
 codegen-units = 1
-opt-level = "s"
+opt-level = 3
 strip = true
 
 # For fuzzing (`cargo run --profile fuzz --example fuzz`): optimised, but unwinding (so a panic can be caught and

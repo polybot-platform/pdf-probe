@@ -249,49 +249,74 @@ fn v5_key(d: &Dict, r: i64, u: &[u8], meter: &Meter) -> Result<Option<Vec<u8>>, 
     if u.len() < 48 || ue.len() < 32 {
         return fail("bad encryption dictionary");
     }
-    let hash = |salt: &[u8]| -> Result<Vec<u8>, Failure> {
+    let hash = |salt: &[u8]| -> Result<[u8; 32], Failure> {
         if r == 6 {
             hash_2b(&[], salt, &[], meter)
         } else {
-            Ok(sha2::sha256(salt).to_vec())
+            Ok(sha2::sha256(salt))
         }
     };
-    if hash(&u[32..40])?[..32] != u[..32] {
+    if hash(&u[32..40])?[..] != u[..32] {
         return Ok(None);
     }
     let ikey = hash(&u[40..48])?;
-    Ok(aes::cbc_decrypt(&ikey[..32], &[0; 16], &ue[..32]))
+    Ok(aes::cbc_decrypt(&ikey, &[0; 16], &ue[..32]))
 }
 
 /// Algorithm 2.B (ISO 32000-2): the revision 6 hash.
-fn hash_2b(password: &[u8], salt: &[u8], udata: &[u8], meter: &Meter) -> Result<Vec<u8>, Failure> {
-    let mut seed = password.to_vec();
+fn hash_2b(password: &[u8], salt: &[u8], udata: &[u8], meter: &Meter) -> Result<[u8; 32], Failure> {
+    let mut seed = Vec::with_capacity(password.len() + salt.len() + udata.len());
+    seed.extend_from_slice(password);
     seed.extend_from_slice(salt);
     seed.extend_from_slice(udata);
-    let mut k = sha2::sha256(&seed).to_vec();
+    let mut k_buf = [0u8; 64];
+    k_buf[..32].copy_from_slice(&sha2::sha256(&seed));
+    let mut k_len = 32usize;
+    let mut buf = [0u8; 64 * (127 + 64 + 48)];
     let mut round = 0usize;
     loop {
-        let mut unit = password.to_vec();
-        unit.extend_from_slice(&k);
-        unit.extend_from_slice(udata);
-        let repeated = unit.repeat(64);
+        let k = &k_buf[..k_len];
+        let unit_len = password.len() + k_len + udata.len();
+        let total_len = unit_len * 64;
+        let first_unit = &mut buf[..unit_len];
+        first_unit[..password.len()].copy_from_slice(password);
+        first_unit[password.len()..password.len() + k_len].copy_from_slice(k);
+        first_unit[password.len() + k_len..].copy_from_slice(udata);
+        for i in 1..64 {
+            buf.copy_within(0..unit_len, i * unit_len);
+        }
         // One AES pass and one SHA pass over the repeated block, every round (at most about 290 rounds).
-        meter.charge(cost::CRYPTO * 2 * repeated.len() as u64)?;
+        meter.charge(cost::CRYPTO * 2 * total_len as u64)?;
         let iv: [u8; 16] = core::array::from_fn(|i| k[16 + i]);
-        let Some(e) = aes::cbc_encrypt(&k[..16], &iv, &repeated) else {
-            return Ok(k);
-        };
+        let key16: [u8; 16] = core::array::from_fn(|i| k[i]);
+        let e = &mut buf[..total_len];
+        if aes::cbc_encrypt_in_place(&key16, &iv, e).is_none() {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&k_buf[..32]);
+            return Ok(out);
+        }
         // The first 16 bytes as a big-endian number, mod 3, equals their sum mod 3 (256 is 1 mod 3).
         let pick: u32 = e[..16].iter().map(|b| u32::from(*b)).sum::<u32>() % 3;
-        k = match pick {
-            0 => sha2::sha256(&e).to_vec(),
-            1 => sha2::sha384(&e).to_vec(),
-            _ => sha2::sha512(&e).to_vec(),
-        };
+        match pick {
+            0 => {
+                k_buf[..32].copy_from_slice(&sha2::sha256(e));
+                k_len = 32;
+            }
+            1 => {
+                k_buf[..48].copy_from_slice(&sha2::sha384(e));
+                k_len = 48;
+            }
+            _ => {
+                k_buf = sha2::sha512(e);
+                k_len = 64;
+            }
+        }
         round += 1;
         let last = i64::from(*e.last().unwrap_or(&0));
         if round >= 64 && last <= round as i64 - 32 {
-            return Ok(k);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&k_buf[..32]);
+            return Ok(out);
         }
     }
 }

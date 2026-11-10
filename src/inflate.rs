@@ -44,8 +44,8 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    /// The next `n` (at most 16) bits, least significant first.
-    fn bits(&mut self, n: u32) -> Res<u32> {
+    /// Ensures at least `n` bits (up to 24) are in `bitbuf`.
+    fn fill(&mut self, n: u32) -> Res<()> {
         while self.bitcnt < n {
             let b = *self
                 .data
@@ -55,6 +55,12 @@ impl Reader<'_> {
             self.bitbuf |= u32::from(b) << self.bitcnt;
             self.bitcnt += 8;
         }
+        Ok(())
+    }
+
+    /// The next `n` (at most 16) bits, least significant first.
+    fn bits(&mut self, n: u32) -> Res<u32> {
+        self.fill(n)?;
         let v = self.bitbuf & ((1u32 << n) - 1);
         self.bitbuf >>= n;
         self.bitcnt -= n;
@@ -62,6 +68,25 @@ impl Reader<'_> {
     }
 
     fn decode<const N: usize>(&mut self, h: &Huffman<N>) -> Res<u16> {
+        if self.bitcnt < 9 {
+            while self.bitcnt < 15 {
+                let Some(&b) = self.data.get(self.pos) else {
+                    break;
+                };
+                self.pos += 1;
+                self.bitbuf |= u32::from(b) << self.bitcnt;
+                self.bitcnt += 8;
+            }
+        }
+        let fast = h.fast[(self.bitbuf & 0x1ff) as usize];
+        if fast != 0 {
+            let len = u32::from(fast >> 9);
+            if len <= self.bitcnt {
+                self.bitbuf >>= len;
+                self.bitcnt -= len;
+                return Ok(fast & 0x1ff);
+            }
+        }
         let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
         for len in 1..16 {
             code |= self.bits(1)? as i32;
@@ -85,6 +110,8 @@ impl Reader<'_> {
 struct Huffman<const N: usize> {
     count: [u16; 16],
     symbol: [u16; N],
+    /// 9-bit lookup table for codes of length 1..=9: `(len << 9) | sym`, or 0.
+    fast: [u16; 512],
 }
 
 /// A canonical Huffman code from code lengths (each at most 15). Over-subscribed codes are rejected.
@@ -107,23 +134,46 @@ const fn build<const N: usize>(lengths: &[u8]) -> Res<Huffman<N>> {
         len += 1;
     }
     let mut offs = [0u16; 16];
+    let mut code = [0u16; 16];
+    let mut next_code = 0u16;
     let mut len = 1;
-    while len < 15 {
-        offs[len + 1] = offs[len] + count[len];
+    while len < 16 {
+        next_code = (next_code + count[len - 1]) << 1;
+        code[len] = next_code;
+        if len < 15 {
+            offs[len + 1] = offs[len] + count[len];
+        }
         len += 1;
     }
     let mut symbol = [0u16; N];
+    let mut fast = [0u16; 512];
     let mut sym = 0;
     while sym < lengths.len() {
-        let l = lengths[sym];
+        let l = lengths[sym] as usize;
         if l != 0 {
-            let slot = offs[l as usize] as usize;
+            let slot = offs[l] as usize;
             symbol[slot] = sym as u16;
-            offs[l as usize] += 1;
+            offs[l] += 1;
+            if l <= 9 {
+                let c = code[l];
+                code[l] += 1;
+                let rev = (c.reverse_bits() >> (16 - l)) as usize;
+                let entry = ((l as u16) << 9) | (sym as u16);
+                let step = 1usize << l;
+                let mut idx = rev;
+                while idx < 512 {
+                    fast[idx] = entry;
+                    idx += step;
+                }
+            }
         }
         sym += 1;
     }
-    Ok(Huffman { count, symbol })
+    Ok(Huffman {
+        count,
+        symbol,
+        fast,
+    })
 }
 
 const FIXED_LIT: Huffman<288> = {
@@ -155,7 +205,8 @@ pub(crate) fn inflate(input: &[u8], max_out: usize) -> Res<Vec<u8>> {
         bitbuf: 0,
         bitcnt: 0,
     };
-    let mut out: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> =
+        Vec::with_capacity(input.len().saturating_mul(2).min(max_out).min(64 << 10));
     let max_blocks = (input.len() / 2).max(64);
     let mut blocks = 0usize;
     loop {
@@ -274,8 +325,19 @@ fn codes<const L: usize, const D: usize>(
             if distance > out.len() {
                 return Err("distance too far back");
             }
-            for _ in 0..len {
-                out.push(out[out.len() - distance]);
+            if out.len() + len > max_out {
+                return Err(TOO_LARGE);
+            }
+            if distance >= len {
+                let start = out.len() - distance;
+                out.extend_from_within(start..start + len);
+            } else if distance == 1 {
+                let b = out[out.len() - 1];
+                out.resize(out.len() + len, b);
+            } else {
+                for _ in 0..len {
+                    out.push(out[out.len() - distance]);
+                }
             }
         }
         if out.len() > max_out {

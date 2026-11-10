@@ -379,9 +379,18 @@ impl<'a> Lexer<'a> {
             return Some(start..end);
         }
         let key = b"endstream";
-        let Some(rel) = self.data[start..].windows(key.len()).position(|w| w == key) else {
-            self.pos = self.data.len();
-            return None;
+        let tail = &self.data[start..];
+        let mut search = 0;
+        let rel = loop {
+            let Some(i) = tail[search..].iter().position(|&b| b == b'e') else {
+                self.pos = self.data.len();
+                return None;
+            };
+            search += i;
+            if tail[search..].starts_with(key) {
+                break search;
+            }
+            search += 1;
         };
         let mut end = start + rel;
         if end > start && self.data[end - 1] == b'\n' {

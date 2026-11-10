@@ -64,9 +64,10 @@ fn gmul(mut a: u8, mut b: u8) -> u8 {
 }
 
 pub(crate) struct Aes {
-    round_keys: Vec<[u8; 16]>,
+    rounds: usize,
+    round_keys: [[u8; 16]; 15],
     /// The same round keys as big-endian words, for the table-driven encryption.
-    enc_words: Vec<[u32; 4]>,
+    enc_words: [[u32; 4]; 15],
 }
 
 impl Aes {
@@ -77,10 +78,10 @@ impl Aes {
             _ => return None,
         };
         let rounds = nk + 6;
-        let mut w: Vec<[u8; 4]> = key
-            .chunks_exact(4)
-            .map(|c| [c[0], c[1], c[2], c[3]])
-            .collect();
+        let mut w = [[0u8; 4]; 60];
+        for (slot, c) in w.iter_mut().zip(key.chunks_exact(4)) {
+            *slot = [c[0], c[1], c[2], c[3]];
+        }
         let mut rcon = 1u8;
         for i in nk..4 * (rounds + 1) {
             let mut t = w[i - 1];
@@ -96,39 +97,31 @@ impl Aes {
                 t = t.map(|b| SBOX[usize::from(b)]);
             }
             let prev = w[i - nk];
-            w.push([
+            w[i] = [
                 prev[0] ^ t[0],
                 prev[1] ^ t[1],
                 prev[2] ^ t[2],
                 prev[3] ^ t[3],
-            ]);
+            ];
         }
-        let round_keys: Vec<[u8; 16]> = w
-            .chunks_exact(4)
-            .map(|c| {
-                let mut k = [0u8; 16];
-                for (i, word) in c.iter().enumerate() {
-                    k[4 * i..4 * i + 4].copy_from_slice(word);
-                }
-                k
-            })
-            .collect();
-        let enc_words: Vec<[u32; 4]> = round_keys
-            .iter()
-            .map(|k| {
-                core::array::from_fn(|c| {
-                    u32::from_be_bytes([k[4 * c], k[4 * c + 1], k[4 * c + 2], k[4 * c + 3]])
-                })
-            })
-            .collect();
+        let mut round_keys = [[0u8; 16]; 15];
+        let mut enc_words = [[0u32; 4]; 15];
+        for r in 0..=rounds {
+            for c in 0..4 {
+                let word = w[4 * r + c];
+                round_keys[r][4 * c..4 * c + 4].copy_from_slice(&word);
+                enc_words[r][c] = u32::from_be_bytes(word);
+            }
+        }
         Some(Aes {
+            rounds,
             round_keys,
             enc_words,
         })
     }
 
     fn rounds(&self) -> usize {
-        self.round_keys.len() - 1
+        self.rounds
     }
 
     fn add_round_key(s: &mut [u8; 16], k: &[u8; 16]) {
@@ -218,22 +211,29 @@ pub(crate) fn cbc_decrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Option<Vec<
     Some(out)
 }
 
-/// CBC encryption with no padding. `None` if the key or the data length is wrong.
-pub(crate) fn cbc_encrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Option<Vec<u8>> {
+/// CBC encryption in place (no padding). `None` if the key or the data length is wrong.
+pub(crate) fn cbc_encrypt_in_place(key: &[u8], iv: &[u8; 16], data: &mut [u8]) -> Option<()> {
     let aes = Aes::new(key)?;
     if !data.len().is_multiple_of(16) {
         return None;
     }
-    let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
-    for block in data.chunks_exact(16) {
+    for block in data.chunks_exact_mut(16) {
         let mut b = [0u8; 16];
         for (i, x) in b.iter_mut().enumerate() {
             *x = block[i] ^ prev[i];
         }
         aes.encrypt_block(&mut b);
-        out.extend_from_slice(&b);
+        block.copy_from_slice(&b);
         prev = b;
     }
+    Some(())
+}
+
+/// CBC encryption with no padding. `None` if the key or the data length is wrong.
+#[cfg(test)]
+pub(crate) fn cbc_encrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = data.to_vec();
+    cbc_encrypt_in_place(key, iv, &mut out)?;
     Some(out)
 }

@@ -35,25 +35,41 @@ fn fail<T>(why: &'static str) -> Result<T, Failure> {
 /// the recovery scan).
 fn find_startxref(data: &[u8]) -> usize {
     let key = b"startxref";
-    let Some(at) = data.windows(key.len()).rposition(|w| w == key) else {
+    let tail_start = data.len().saturating_sub(1024);
+    let at = data[tail_start..]
+        .windows(key.len())
+        .rposition(|w| w == key)
+        .map(|i| tail_start + i)
+        .or_else(|| {
+            let end = (tail_start + key.len() - 1).min(data.len());
+            data[..end].windows(key.len()).rposition(|w| w == key)
+        });
+    let Some(at) = at else {
         return 0;
     };
     let mut p = at + key.len();
     while data.get(p).is_some_and(|b| matches!(b, 9 | 10 | 13 | 32)) {
         p += 1;
     }
-    let text: Vec<u8> = data[p.min(data.len())..]
+    let digits = data[p.min(data.len())..]
         .iter()
         .copied()
         .take_while(|b| (0x20..=0x39).contains(b))
-        .collect();
-    let text = String::from_utf8_lossy(&text);
-    let digits: String = text
-        .trim_start()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().unwrap_or(0)
+        .skip_while(|b| *b == b' ')
+        .take_while(u8::is_ascii_digit);
+    let mut val = 0usize;
+    let mut any = false;
+    for b in digits {
+        any = true;
+        let Some(next) = val
+            .checked_mul(10)
+            .and_then(|v| v.checked_add((b - b'0') as usize))
+        else {
+            return 0;
+        };
+        val = next;
+    }
+    if any { val } else { 0 }
 }
 
 pub(crate) fn read(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure> {
@@ -319,14 +335,24 @@ fn obj_header_at(d: &[u8], i: usize) -> Option<usize> {
 /// The first match of `\b(endobj|\d+\s+\d+\s+obj|xref|trailer\s*<<)\b` at or after `from`:
 /// (start, end, it is `endobj`).
 fn find_obj_end(d: &[u8], from: usize) -> Option<(usize, usize, bool)> {
-    for i in from..d.len() {
+    let mut i = from;
+    while i < d.len() {
+        let rel = d[i..]
+            .iter()
+            .position(|&b| matches!(b, b'e' | b'x' | b't' | b'0'..=b'9'))?;
+        i += rel;
         match d[i] {
             b'e' if d[i..].starts_with(b"endobj") && boundary(d, i) && boundary(d, i + 6) => {
                 return Some((i, i + 6, true));
             }
-            b'0'..=b'9' if boundary(d, i) => {
-                if let Some(e) = obj_header_at(d, i) {
+            b'0'..=b'9' => {
+                if boundary(d, i)
+                    && let Some(e) = obj_header_at(d, i)
+                {
                     return Some((i, e, false));
+                }
+                while i + 1 < d.len() && d[i + 1].is_ascii_digit() {
+                    i += 1;
                 }
             }
             b'x' if d[i..].starts_with(b"xref") && boundary(d, i) && boundary(d, i + 4) => {
@@ -343,24 +369,36 @@ fn find_obj_end(d: &[u8], from: usize) -> Option<(usize, usize, bool)> {
             }
             _ => {}
         }
+        i += 1;
     }
     None
 }
 
 /// The first match of `\b(startxref|\d+\s+\d+\s+obj)\b` at or after `from`: (start, end, it is `startxref`).
 fn find_after_trailer(d: &[u8], from: usize) -> Option<(usize, usize, bool)> {
-    for i in from..d.len() {
+    let mut i = from;
+    while i < d.len() {
+        let rel = d[i..]
+            .iter()
+            .position(|&b| matches!(b, b's' | b'0'..=b'9'))?;
+        i += rel;
         match d[i] {
             b's' if d[i..].starts_with(b"startxref") && boundary(d, i) && boundary(d, i + 9) => {
                 return Some((i, i + 9, true));
             }
-            b'0'..=b'9' if boundary(d, i) => {
-                if let Some(e) = obj_header_at(d, i) {
+            b'0'..=b'9' => {
+                if boundary(d, i)
+                    && let Some(e) = obj_header_at(d, i)
+                {
                     return Some((i, e, false));
+                }
+                while i + 1 < d.len() && d[i + 1].is_ascii_digit() {
+                    i += 1;
                 }
             }
             _ => {}
         }
+        i += 1;
     }
     None
 }
@@ -368,9 +406,18 @@ fn find_after_trailer(d: &[u8], from: usize) -> Option<(usize, usize, bool)> {
 /// How many bytes from `offset` until `what` (or to the end of the data).
 fn skip_until(d: &[u8], offset: usize, what: &[u8]) -> usize {
     let tail = &d[offset.min(d.len())..];
-    tail.windows(what.len())
-        .position(|w| w == what)
-        .unwrap_or(tail.len())
+    let Some(&first) = what.first() else {
+        return 0;
+    };
+    let mut pos = 0;
+    while let Some(i) = tail[pos..].iter().position(|&b| b == first) {
+        pos += i;
+        if tail[pos..].starts_with(what) {
+            return pos;
+        }
+        pos += 1;
+    }
+    tail.len()
 }
 
 /// A "token" in pdf.js's scan: the bytes up to the next line break or `<`. Like pdf.js, a token that runs to

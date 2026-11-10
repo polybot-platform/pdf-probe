@@ -64,8 +64,8 @@ export function loadPdfProbeWasm(wasm: BufferSource | WebAssembly.Module, option
         needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, maxInputBytes, maxWorkMillions, outPtr, outCap)
       }
       if (needed < 0) throw new Error(`pdf_probe_check failed with ${needed}`)
-      // Copy out of linear memory before freeing it.
-      const result = decodeResult(new Uint8Array(x.memory.buffer, outPtr, needed).slice(), needed)
+      // Decode directly from linear memory before freeing it.
+      const result = decodeResult(new Uint8Array(x.memory.buffer, outPtr, needed), needed)
       x.pdf_probe_free(outPtr, outCap)
       x.pdf_probe_free(inPtr, bytes.length)
       if (x.memory.buffer.byteLength > recycleAboveBytes) {

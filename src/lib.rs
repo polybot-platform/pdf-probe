@@ -131,6 +131,9 @@ pub(crate) struct Doc<'a> {
     decoded: usize,
     objstms: HashMap<u32, ObjStm>,
     crypto: Option<Crypto>,
+    /// Objects reached through a reference from another object (a shared `/MediaBox`, say), parsed once.
+    shared: HashMap<u32, Obj>,
+    shared_weight: usize,
 }
 
 impl Doc<'_> {
@@ -264,16 +267,46 @@ impl Doc<'_> {
         })
     }
 
+    /// Like [`Doc::fetch`], but remembers the result, within a fixed budget. Without this, a value that
+    /// many pages refer to is parsed again for every page, so the work grows with pages times its size.
+    /// Page tree nodes are read once and go through `fetch`, so they do not use up the budget.
+    fn fetch_shared(&mut self, num: u32) -> Result<Obj, Failure> {
+        if let Some(obj) = self.shared.get(&num) {
+            return Ok(obj.clone());
+        }
+        let obj = self.fetch(num)?;
+        let weight = weight(&obj);
+        if self.shared_weight + weight <= SHARED_BUDGET {
+            self.shared_weight += weight;
+            self.shared.insert(num, obj.clone());
+        }
+        Ok(obj)
+    }
+
     /// Follows references until a direct object is reached.
     pub(crate) fn resolve(&mut self, obj: &Obj) -> Result<Obj, Failure> {
         let mut current = obj.clone();
         for _ in 0..16 {
             match current {
-                Obj::Ref(n, _) => current = self.fetch(n)?,
+                Obj::Ref(n, _) => current = self.fetch_shared(n)?,
                 other => return Ok(other),
             }
         }
         Err(Failure::Unparseable("reference chain too long"))
+    }
+}
+
+/// How much parsed data [`Doc::fetch_shared`] keeps, counted in object nodes (about 32 bytes each, so
+/// roughly 32 MB at most).
+const SHARED_BUDGET: usize = 1 << 20;
+
+/// The size of a parsed object, in nodes plus the bytes of its names and strings.
+fn weight(obj: &Obj) -> usize {
+    match obj {
+        Obj::Name(b) | Obj::Str(b) => 1 + b.len(),
+        Obj::Array(items) => 1 + items.iter().map(weight).sum::<usize>(),
+        Obj::Dict(d) => 1 + d.0.iter().map(|(k, v)| k.len() + weight(v)).sum::<usize>(),
+        _ => 1,
     }
 }
 
@@ -326,6 +359,8 @@ impl<'a> Doc<'a> {
             decoded,
             objstms: HashMap::new(),
             crypto: None,
+            shared: HashMap::new(),
+            shared_weight: 0,
         }
     }
 }
@@ -784,25 +819,31 @@ mod tests {
     }
 
     #[test]
-    fn re_parsing_one_object_for_every_page_runs_out_of_budget() {
+    fn an_object_shared_by_every_page_is_parsed_once() {
         let pdf = big_inherited_box(200, 20_000);
         assert!(
             pdf.len() < 600_000,
             "the file is small: {} bytes",
             pdf.len()
         );
+        // One parse of the array is about 400 KB x 10 units; re-parsing it for each of 200 pages was over 800M.
+        let p = probe(&pdf, &Limits::default()).unwrap();
+        assert_eq!(p.pages, 200);
+        assert!(p.work < 20_000_000, "it cost {} units", p.work);
+    }
+
+    #[test]
+    fn an_object_too_big_to_keep_still_runs_out_of_budget() {
+        // More nodes than the shared budget, so it is parsed again for every page and the work budget stops it.
+        let pdf = big_inherited_box(100, SHARED_BUDGET + 100_000);
         let budget = Limits {
-            max_work: 50_000_000,
+            max_work: 100_000_000,
             ..Limits::default()
         };
         assert_eq!(
             probe(&pdf, &budget),
             Err(Failure::LimitExceeded(Limit::Work))
         );
-        // With the default budget the same file is still read: the budget is what stopped it, not the shape.
-        let all = probe(&pdf, &Limits::default()).unwrap();
-        assert_eq!(all.pages, 200);
-        assert!(all.work > 50_000_000, "it cost {} units", all.work);
     }
 
     /// The same file with its `startxref` value replaced.

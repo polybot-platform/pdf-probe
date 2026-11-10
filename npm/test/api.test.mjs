@@ -121,20 +121,22 @@ for (const engine of engines) {
 
   test(`${engine}: maxWork stops work that is large only in total`, async () => {
     const probe = await createProbe({ engine })
-    const hostile = bigInheritedBox(100, 20_000)
-    assert.ok(hostile.length < 400_000, `the file is small: ${hostile.length} bytes`)
-    assert.deepEqual(probe.check(hostile, { maxWork: 5_000_000 }), { status: 'limitExceeded', limit: 'work' })
-    // The default budget reads the same file, so it is the budget that stopped it, not the file.
-    const all = probe.check(hostile)
-    assert.equal(all.status, 'ok')
-    assert.equal(all.pages, 100)
+    // One inherited array that every page uses is read once, however many pages there are.
+    const shared = bigInheritedBox(100, 20_000)
+    assert.ok(shared.length < 100_000, `the file is small: ${shared.length} bytes`)
+    const ok = probe.check(shared)
+    assert.equal(ok.status, 'ok')
+    assert.equal(ok.pages, 100)
+    // Too big to keep (over a million nodes), it is read again for every page, and the budget stops it.
+    const hostile = bigInheritedBox(100, 1_100_000)
+    assert.deepEqual(probe.check(hostile, { maxWork: 100_000_000 }), { status: 'limitExceeded', limit: 'work' })
     // A tiny budget is rounded up to a million units, which is plenty for a tiny file.
     assert.equal(probe.check(pdf, { maxWork: 1 }).status, 'ok')
   })
 
   test(`${engine}: a limit is a result, never an exception, and is the same on every call`, async () => {
     const probe = await createProbe({ engine })
-    const hostile = bigInheritedBox(50, 20_000)
+    const hostile = bigInheritedBox(50, 1_100_000)
     const first = probe.check(hostile, { maxWork: 3_000_000 })
     for (let i = 0; i < 3; i++) assert.deepEqual(probe.check(hostile, { maxWork: 3_000_000 }), first)
     assert.deepEqual(first, { status: 'limitExceeded', limit: 'work' })

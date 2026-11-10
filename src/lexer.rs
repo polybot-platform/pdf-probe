@@ -1,6 +1,8 @@
 //! A small PDF object lexer and parser. Bounded: nesting depth is limited, and nothing here recurses on
 //! untrusted structure except `parse_obj`, which stops at `MAX_NEST`.
 
+use std::rc::Rc;
+
 /// Deepest allowed nesting of arrays and dictionaries.
 const MAX_NEST: usize = 64;
 
@@ -12,7 +14,8 @@ pub(crate) enum Obj {
     Real(f64),
     Name(Vec<u8>),
     Str(Vec<u8>),
-    Array(Vec<Obj>),
+    /// Shared, so that cloning a large array (an inherited `/MediaBox`, say) copies a pointer.
+    Array(Rc<Vec<Obj>>),
     Dict(Dict),
     Ref(u32, u16),
 }
@@ -161,7 +164,7 @@ impl<'a> Lexer<'a> {
                     }
                     items.push(self.parse_nested(depth + 1)?);
                 }
-                Some(Obj::Array(items))
+                Some(Obj::Array(Rc::new(items)))
             }
             b'+' | b'-' | b'.' | b'0'..=b'9' => self.read_number_or_ref(),
             _ => {

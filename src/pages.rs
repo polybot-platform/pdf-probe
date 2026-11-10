@@ -134,7 +134,7 @@ fn walk(
             *slot = Some(v.clone());
         }
     }
-    for kid in &kids {
+    for kid in kids.iter() {
         if out.len() >= limit {
             break;
         }
@@ -171,7 +171,7 @@ fn rect(doc: &mut Doc, obj: Option<&Obj>) -> Result<Option<Rect>, Failure> {
         return Ok(None);
     }
     let mut v = [0.0; 4];
-    for (slot, item) in v.iter_mut().zip(&items) {
+    for (slot, item) in v.iter_mut().zip(items.iter()) {
         match doc.resolve(item)?.as_f64() {
             Some(n) => *slot = n,
             None => return Ok(None),

@@ -67,6 +67,10 @@ A native shared library can be embedded the same way and passed as `nativeLibrar
 - **Passwords:** Only an empty user password is tried (RC4, AES-128, AES-256 R5/R6). Files requiring a user password return `unparseable`.
 - **WebAssembly memory (`recycleAboveBytes`):** WebAssembly linear memory only grows; when it passes `recycleAboveBytes` (default `32 MiB`), the instance is transparently replaced with a fresh one.
 
+The WebAssembly engine reuses input and result buffers between checks. Oversized inputs are rejected before
+being copied into WebAssembly memory. Call `probe.close()` when finished to release the engine references and
+retained buffers.
+
 ## License
 
 MIT OR Apache-2.0.

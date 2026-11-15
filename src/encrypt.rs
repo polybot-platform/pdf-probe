@@ -9,6 +9,7 @@ use crate::meter::{Meter, cost};
 use crate::xref::Entry;
 use crate::{Doc, Failure};
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 const PAD: [u8; 32] = [
     0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
@@ -33,7 +34,7 @@ pub(crate) struct Crypto {
     /// The default for streams (`/StmF`, or RC4 before version 4).
     stmf: Method,
     /// Named crypt filters (`/CF`), for a stream that picks one with `/Filter /Crypt`.
-    filters: Vec<(Vec<u8>, Method)>,
+    filters: HashMap<Vec<u8>, Method>,
 }
 
 fn name_of(o: Option<&Obj>) -> Option<&[u8]> {
@@ -43,7 +44,7 @@ fn name_of(o: Option<&Obj>) -> Option<&[u8]> {
     }
 }
 
-fn method_of(cf: &Dict, name: &[u8]) -> Method {
+fn method_of(cf: &HashMap<Vec<u8>, Obj>, name: &[u8]) -> Method {
     if name == b"Identity" {
         return Method::Identity;
     }
@@ -86,13 +87,13 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
         return fail("unsupported encryption version");
     }
     let bytes = |k: &[u8]| match d.get(k) {
-        Some(Obj::Str(s)) => s.clone(),
-        _ => Vec::new(),
+        Some(Obj::Str(s)) => s.as_slice(),
+        _ => &[],
     };
     let (o, u) = (bytes(b"O"), bytes(b"U"));
 
     // Crypt filters (version 4 and 5).
-    let mut cf = Dict::default();
+    let mut cf = HashMap::new();
     let (mut stmf_name, mut strf_name, mut eff_name) =
         (b"Identity".to_vec(), b"Identity".to_vec(), None);
     if v >= 4 {
@@ -100,11 +101,10 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
             && let Obj::Dict(c) = doc.resolve(c)?
         {
             // The values may be indirect; resolve them so the dictionary is self-contained.
-            let mut entries = Vec::with_capacity(c.0.len());
             for (k, val) in c.0.iter() {
-                entries.push((k.clone(), doc.resolve(val)?));
+                doc.meter.charge(cost::NODE + cost::SCAN * k.len() as u64)?;
+                cf.insert(k.clone(), doc.resolve(val)?);
             }
-            cf = Dict(entries.into());
         }
         stmf_name = name_of(d.get(b"StmF")).unwrap_or(b"Identity").to_vec();
         strf_name = name_of(d.get(b"StrF")).unwrap_or(b"Identity").to_vec();
@@ -115,21 +115,18 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
     } else {
         Method::Rc4
     };
-    let filters: Vec<(Vec<u8>, Method)> =
-        cf.0.iter()
-            .map(|(k, _)| (k.clone(), method_of(&cf, k)))
-            .collect();
+    let filters = cf.keys().map(|k| (k.clone(), method_of(&cf, k))).collect();
 
     let id0 = match doc.xref.trailer.get(b"ID") {
         Some(Obj::Array(a)) => match a.first() {
-            Some(Obj::Str(s)) => s.clone(),
-            _ => Vec::new(),
+            Some(Obj::Str(s)) => s.as_slice(),
+            _ => &[],
         },
-        _ => Vec::new(),
+        _ => &[],
     };
 
     let key = if v == 5 {
-        v5_key(&d, r, &u, doc.meter)?
+        v5_key(&d, r, u, doc.meter)?
     } else {
         // Key length in bits (pdf.js: /Length, else 40 before version 4, else the stream filter's /Length).
         let mut bits = int(b"Length").unwrap_or(0);
@@ -155,10 +152,10 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
         let encrypt_metadata = !matches!(d.get(b"EncryptMetadata"), Some(Obj::Bool(false)));
         let p = int(b"P").unwrap_or(0);
         let key = legacy_key(
-            &o,
-            &u,
+            o,
+            u,
             p,
-            &id0,
+            id0,
             r,
             (bits / 8) as usize,
             v >= 4 && !encrypt_metadata,
@@ -345,10 +342,7 @@ impl Crypto {
         let name = parms
             .and_then(|p| name_of(p.get(b"Name")))
             .unwrap_or(b"Identity");
-        self.filters
-            .iter()
-            .find(|(k, _)| k == name)
-            .map_or(Method::Identity, |(_, m)| *m)
+        self.filters.get(name).copied().unwrap_or(Method::Identity)
     }
 
     /// The per-object key (algorithm 1) for RC4 and AES-128.
@@ -415,6 +409,82 @@ fn aes_cbc_unpad(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Limits;
+    use crate::lexer::Lexer;
+    use crate::xref::Xref;
+
+    fn deferred_crypto(filters: &str, budget: u64) -> Result<Crypto, Failure> {
+        // Only embedded files are encrypted, so no key is needed to inspect the page tree.
+        let source = format!(
+            "<< /Encrypt << /Filter /Standard /V 4 /R 4 /Length 128 /O <> /U <> \
+             /EFF /Deferred /CF << {filters} /Deferred << /AuthEvent /EFOpen >> >> >> >>"
+        );
+        let Some(Obj::Dict(trailer)) =
+            Lexer::new(source.as_bytes(), 0, &Meter::new(u64::MAX)).parse_obj()
+        else {
+            panic!("encryption dictionary");
+        };
+        let limits = Limits::default();
+        let meter = Meter::new(budget);
+        let mut doc = Doc::new(
+            b"",
+            Xref {
+                entries: HashMap::new(),
+                trailer,
+                decoded: 0,
+            },
+            &limits,
+            &meter,
+        );
+        setup(&mut doc).map(Option::unwrap)
+    }
+
+    #[test]
+    fn crypt_filter_index_preserves_duplicate_and_identity_rules() {
+        let crypto = deferred_crypto(
+            "/Duplicate << /CFM /V2 >> /Duplicate << /CFM /AESV2 >> \
+             /Identity << /CFM /AESV3 >> /Unknown null",
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            crypto.filters.get(b"Duplicate".as_slice()),
+            Some(&Method::AesV2)
+        );
+        assert_eq!(
+            crypto.filters.get(b"Identity".as_slice()),
+            Some(&Method::Identity)
+        );
+        assert_eq!(
+            crypto.filters.get(b"Unknown".as_slice()),
+            Some(&Method::Identity)
+        );
+        for (name, expected) in [
+            ("Duplicate", Method::AesV2),
+            ("Identity", Method::Identity),
+            ("Missing", Method::Identity),
+        ] {
+            let source = format!("<< /Filter [/Crypt] /DecodeParms [<< /Name /{name} >>] >>");
+            let Some(Obj::Dict(stream)) =
+                Lexer::new(source.as_bytes(), 0, &Meter::new(u64::MAX)).parse_obj()
+            else {
+                panic!("stream")
+            };
+            assert_eq!(crypto.method_for(&stream), expected);
+        }
+    }
+
+    #[test]
+    fn indexing_crypt_filters_spends_work_for_each_entry() {
+        let filters: String = (0..2000)
+            .map(|i| format!("/F{i} << /CFM /None >> "))
+            .collect();
+        assert!(deferred_crypto(&filters, 100_000).is_ok());
+        assert!(matches!(
+            deferred_crypto(&filters, 1_000),
+            Err(Failure::LimitExceeded(crate::Limit::Work))
+        ));
+    }
 
     /// A revision 5 (SHA-256) user entry for the empty password and the given file key, as a generator
     /// would write it: `U` is hash || validation salt || key salt, `UE` is the file key encrypted with the
@@ -432,7 +502,10 @@ mod tests {
     }
 
     fn dict_with_ue(ue: Vec<u8>) -> Dict {
-        Dict(vec![(b"UE".to_vec(), Obj::Str(ue))].into())
+        Dict(std::rc::Rc::new(crate::lexer::Items::from(vec![(
+            b"UE".to_vec(),
+            Obj::Str(std::rc::Rc::new(ue)),
+        )])))
     }
 
     #[test]
@@ -487,7 +560,7 @@ mod tests {
         let c = Crypto {
             key: Some(vec![1; 5]),
             stmf: Method::Rc4,
-            filters: Vec::new(),
+            filters: HashMap::new(),
         };
         assert_eq!(c.object_key(&[1; 5], 7, 0, false).len(), 10);
         assert_eq!(c.object_key(&[1; 16], 7, 0, true).len(), 16);

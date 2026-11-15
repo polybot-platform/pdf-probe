@@ -16,16 +16,16 @@ pub(crate) enum Obj {
     Bool(bool),
     Int(i64),
     Real(f64),
-    Name(Vec<u8>),
-    Str(Vec<u8>),
-    /// Shared, so that cloning a large array (an inherited `/MediaBox`, say) copies a pointer.
+    Name(Rc<Vec<u8>>),
+    Str(Rc<Vec<u8>>),
+    /// Parsed values are immutable and shared, so resolving inherited values only copies pointers.
     Array(Rc<Items<Obj>>),
     Dict(Dict),
     Ref(u32, u16),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct Dict(pub Items<(Vec<u8>, Obj)>);
+pub(crate) struct Dict(pub Rc<Items<(Vec<u8>, Obj)>>);
 
 thread_local! {
     /// Items of arrays and dictionaries alive on this thread. Parsed objects hold `Rc`s, so they never leave
@@ -56,7 +56,8 @@ pub(crate) fn add_live_within(base: usize, max: usize) -> bool {
 
 /// The items of an array or dictionary. They count as alive from when they are added until the container is
 /// dropped, wherever that happens, so the limit on parsed values ([`Meter`]) measures memory in use and no
-/// caller has to give anything back. A clone counts again: it is a copy.
+/// caller has to give anything back. Arrays and dictionaries share their items through an `Rc`, so cloning
+/// one copies a pointer and counts nothing; a clone of the items themselves counts again.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Items<T>(Vec<T>);
 
@@ -229,15 +230,15 @@ impl<'a> Lexer<'a> {
         match self.peek()? {
             b'/' => {
                 self.pos += 1;
-                Some(Obj::Name(self.read_name()))
+                Some(Obj::Name(Rc::new(self.read_name())))
             }
-            b'(' => self.read_literal_string().map(Obj::Str),
+            b'(' => self.read_literal_string().map(|s| Obj::Str(Rc::new(s))),
             b'<' => {
                 if self.data.get(self.pos + 1) == Some(&b'<') {
                     self.pos += 2;
                     self.read_dict_body(depth).map(Obj::Dict)
                 } else {
-                    self.read_hex_string().map(Obj::Str)
+                    self.read_hex_string().map(|s| Obj::Str(Rc::new(s)))
                 }
             }
             b'[' => {
@@ -277,11 +278,14 @@ impl<'a> Lexer<'a> {
             self.skip_ws();
             if self.data[self.pos.min(self.data.len())..].starts_with(b">>") {
                 self.pos += 2;
-                return Some(Dict(entries));
+                return Some(Dict(Rc::new(entries)));
             }
-            let Obj::Name(key) = self.parse_nested(depth + 1)? else {
+            // Keys are owned by the dictionary and never resolved, so they need no Rc allocation.
+            if depth >= MAX_NEST || self.peek()? != b'/' {
                 return None;
-            };
+            }
+            self.pos += 1;
+            let key = self.read_name();
             let value = self.parse_nested(depth + 1)?;
             if !entries.push((key, value), self.meter) {
                 return None;
@@ -548,8 +552,8 @@ mod tests {
         let copy = first.clone();
         assert_eq!(
             live_items() - base,
-            5,
-            "the entry is copied, the array shared"
+            4,
+            "dictionaries and arrays are shared, not copied"
         );
         drop((first, copy));
         assert_eq!(live_items(), base);
@@ -563,5 +567,50 @@ mod tests {
                 .parse_obj()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn resolving_clones_share_dictionaries_names_and_strings() {
+        let meter = Meter::new(u64::MAX);
+        let obj = Lexer::new(
+            b"<< /Text (shared) /Name /Shared /Nested << /A 1 >> >>",
+            0,
+            &meter,
+        )
+        .parse_obj()
+        .unwrap();
+        let Obj::Dict(original) = &obj else {
+            panic!("dictionary")
+        };
+        let Obj::Dict(copy) = obj.clone() else {
+            panic!("dictionary")
+        };
+        assert!(Rc::ptr_eq(&original.0, &copy.0));
+        for key in [b"Text".as_slice(), b"Name"] {
+            let value = original.get(key).unwrap();
+            match (value, value.clone()) {
+                (Obj::Str(a), Obj::Str(b)) | (Obj::Name(a), Obj::Name(b)) => {
+                    assert!(Rc::ptr_eq(a, &b));
+                }
+                _ => panic!("shared bytes"),
+            }
+        }
+    }
+
+    #[test]
+    fn dictionary_keys_decode_escapes_and_keep_the_last_duplicate() {
+        let meter = Meter::new(u64::MAX);
+        let Obj::Dict(dict) =
+            Lexer::new(b"<< /A 1 /#41 2 /Nested << /#42 (value) >> >>", 0, &meter)
+                .parse_obj()
+                .unwrap()
+        else {
+            panic!("dictionary")
+        };
+        assert_eq!(dict.get(b"A"), Some(&Obj::Int(2)));
+        let Some(Obj::Dict(nested)) = dict.get(b"Nested") else {
+            panic!("nested dictionary")
+        };
+        assert!(matches!(nested.get(b"B"), Some(Obj::Str(s)) if s.as_slice() == b"value"));
     }
 }

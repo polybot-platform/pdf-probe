@@ -47,7 +47,7 @@ export interface Probe {
    * a bad call.
    */
   check(pdf: Uint8Array | ArrayBuffer, options?: CheckOptions): ProbeResult
-  /** Releases the native library. A probe cannot be used afterwards. */
+  /** Releases the engine and its retained buffers. A probe cannot be used afterwards. */
   close(): void
 }
 
@@ -82,17 +82,17 @@ function prepare(
 
 type Run = (bytes: Uint8Array, maxPages: number, maxInputBytes: number, maxWorkMillions: number) => ProbeResult
 
-function wrap(engine: 'native' | 'wasm', run: Run, release: () => void): Probe {
-  let closed = false
+function wrap(engine: 'native' | 'wasm', run: Run | undefined, release: (() => void) | undefined): Probe {
   return {
     engine,
     check(pdf, options) {
-      if (closed) throw new Error('this probe is closed')
+      if (!run) throw new Error('this probe is closed')
       return run(...prepare(pdf, options))
     },
     close() {
-      if (!closed) release()
-      closed = true
+      if (run) release?.()
+      run = undefined
+      release = undefined
     },
   }
 }

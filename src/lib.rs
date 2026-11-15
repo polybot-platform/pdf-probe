@@ -295,7 +295,7 @@ impl Doc<'_> {
         }
         self.meter.charge(cost::PARSE * lx.pos() as u64)?;
         Ok(ObjStm {
-            data: bytes,
+            data: bytes.into_owned(),
             first,
             index,
         })
@@ -306,7 +306,8 @@ impl Doc<'_> {
     /// Page tree nodes are read once and go through `fetch`, so they do not use up the budget.
     fn fetch_shared(&mut self, num: u32) -> Result<Obj, Failure> {
         if let Some(obj) = self.shared.get(&num) {
-            // A dictionary is copied, and the copy counts towards the limit on items alive.
+            // Arrays and dictionaries are shared, so this copies pointers; any copy made counts towards the
+            // limit on items alive.
             let obj = obj.clone();
             self.meter.check_values()?;
             return Ok(obj);
@@ -335,8 +336,8 @@ impl Doc<'_> {
     }
 }
 
-/// How much parsed data [`Doc::fetch_shared`] keeps, counted in object nodes (about 32 bytes each, so
-/// roughly 32 MB at most).
+/// How much parsed data [`Doc::fetch_shared`] keeps, counted in object nodes plus name and string bytes.
+/// Cached values share their storage with callers.
 const SHARED_BUDGET: usize = 1 << 20;
 
 /// The size of a parsed object, in nodes plus the bytes of its names and strings.

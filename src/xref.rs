@@ -215,7 +215,7 @@ fn read_xref_stream(
         return fail("not a cross-reference stream");
     };
     meter.charge(cost::SCAN * range.end.saturating_sub(lx.pos()) as u64)?;
-    if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n == b"XRef") {
+    if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n.as_slice() == b"XRef") {
         return fail("not a cross-reference stream");
     }
     let remaining = limits.max_decompressed.saturating_sub(*decoded);

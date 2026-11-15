@@ -41,9 +41,11 @@ pub struct Limits {
     /// Total bytes inflated from all streams read ([`Limit::Decompressed`]).
     pub max_decompressed: usize,
     /// Items of parsed arrays and dictionaries alive at once ([`Limit::Values`]). Bounds memory: a small
-    /// compressed stream can inflate to millions of tiny values. Each costs a few dozen bytes, so the default
-    /// allows on the order of 100 MB. Values count only while the object holding them is alive, so a long
-    /// document does not add up against this; real files keep at most a few tens of thousands alive.
+    /// compressed stream can inflate to millions of tiny values. An item costs about 100 bytes at worst (a
+    /// dictionary entry with its own key allocation and growth slack), so the default keeps peak memory near
+    /// 100 MB. Items count only while the object holding them is alive, and the shared-object cache may hold
+    /// at most half of them, so a long document does not add up against this; real files keep at most a few
+    /// tens of thousands alive.
     pub max_values: usize,
 }
 
@@ -56,7 +58,7 @@ impl Default for Limits {
             max_objects: 1_000_000,
             max_xref_sections: 256,
             max_decompressed: 64 << 20,
-            max_values: 2_000_000,
+            max_values: 1_000_000,
         }
     }
 }
@@ -78,7 +80,7 @@ pub enum Limit {
     XrefSections,
     /// More than [`Limits::max_decompressed`] bytes inflated.
     Decompressed,
-    /// More than [`Limits::max_values`] values parsed.
+    /// More than [`Limits::max_values`] items of arrays and dictionaries alive at once.
     Values,
 }
 
@@ -181,6 +183,7 @@ impl Doc<'_> {
                 };
                 let mut lx = Lexer::new(self.data, offset, self.meter);
                 let parsed = lx.parse_indirect();
+                self.meter.check_values()?;
                 self.meter
                     .charge(cost::PARSE * (lx.pos() - offset) as u64)?;
                 match parsed {
@@ -227,6 +230,7 @@ impl Doc<'_> {
         }
         let mut lx = Lexer::new(&stm.data, start, self.meter);
         let parsed = lx.parse_obj();
+        self.meter.check_values()?;
         self.meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
         parsed.ok_or(Failure::Unparseable("unreadable compressed object"))
     }
@@ -243,7 +247,9 @@ impl Doc<'_> {
         let Some(offset) = offset else {
             return Err(Failure::Unparseable("object stream offset past the end"));
         };
-        let Some(ind) = Lexer::new(self.data, offset, self.meter).parse_indirect_full() else {
+        let parsed = Lexer::new(self.data, offset, self.meter).parse_indirect_full();
+        self.meter.check_values()?;
+        let Some(ind) = parsed else {
             return Err(Failure::Unparseable("unreadable object stream"));
         };
         let (Obj::Dict(dict), Some(range)) = (ind.obj, ind.stream) else {
@@ -297,11 +303,16 @@ impl Doc<'_> {
     /// Page tree nodes are read once and go through `fetch`, so they do not use up the budget.
     fn fetch_shared(&mut self, num: u32) -> Result<Obj, Failure> {
         if let Some(obj) = self.shared.get(&num) {
-            return Ok(obj.clone());
+            // A dictionary is copied, and the copy counts towards the limit on items alive.
+            let obj = obj.clone();
+            self.meter.check_values()?;
+            return Ok(obj);
         }
         let obj = self.fetch(num)?;
         let weight = weight(&obj);
-        if self.shared_weight + weight <= SHARED_BUDGET {
+        // What the cache keeps stays alive for the whole call, so it may fill at most half the limit.
+        let budget = SHARED_BUDGET.min(self.limits.max_values / 2);
+        if self.shared_weight + weight <= budget {
             self.shared_weight += weight;
             self.shared.insert(num, obj.clone());
         }
@@ -419,16 +430,12 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     };
     let result = match first {
         Ok(probe) => Ok(probe),
-        // Past the value limit every parse fails, so skip a rescan of the whole file that cannot succeed.
-        Err(Fault { recover: true, .. }) if !meter.values_exceeded() => {
-            recover(data, limits, &meter).and_then(|xref| {
-                run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
-            })
-        }
+        Err(Fault { recover: true, .. }) => recover(data, limits, &meter)
+            .and_then(|xref| run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)),
         Err(fault) => Err(fault.failure),
     };
-    // The parser stops at the value limit by failing, and callers see that as a bad object, which some of them
-    // tolerate. Report the limit, whatever was made of it.
+    // Parse sites report the value limit as a limit, which ends the call. This is a backstop for a site that
+    // tolerated a failed parse before checking.
     if meter.values_exceeded() {
         return Err(Failure::LimitExceeded(Limit::Values));
     }
@@ -854,6 +861,32 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_cache_fills_at_most_half_the_value_limit() {
+        // Each page's /MediaBox is its own indirect array, so every one is cached: 1,200 items would stay
+        // alive, more than the limit of 1,000, if the cache could take all of them.
+        let kids: String = (0..300).map(|i| format!("{} 0 R ", 3 + i)).collect();
+        let mut objects = vec![
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string()),
+            (2, format!("<< /Type /Pages /Kids [{kids}] /Count 300 >>")),
+        ];
+        for i in 0..300 {
+            objects.push((
+                3 + i,
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox {} 0 R >>", 303 + i),
+            ));
+            objects.push((303 + i, format!("[0 0 612 {}]", 700 + i)));
+        }
+        let objects: Vec<(u32, &str)> = objects.iter().map(|(n, b)| (*n, b.as_str())).collect();
+        let limits = Limits {
+            max_values: 1_000,
+            ..Limits::default()
+        };
+        let p = probe(&build(&objects, 1), &limits).unwrap();
+        assert_eq!(p.pages, 300);
+        assert_eq!(p.sizes[299].height, 999.0);
+    }
+
+    #[test]
     fn values_of_incremental_trailers_dropped_do_not_count() {
         // Ten updates, each with a trailer holding 1,000 extra values: 10,000 parsed, a few thousand alive.
         let mut pdf = one_page("/MediaBox [0 0 612 792]");
@@ -1100,8 +1133,9 @@ mod tests {
 
     #[test]
     fn an_object_too_big_to_keep_still_runs_out_of_budget() {
-        // More nodes than the shared budget, so it is parsed again for every page and the work budget stops it.
-        let pdf = big_inherited_box(100, SHARED_BUDGET + 100_000);
+        // More than the cache may keep (half the value limit), so it is parsed again for every page and the work
+        // budget stops it.
+        let pdf = big_inherited_box(100, 900_000);
         let budget = Limits {
             max_work: 100_000_000,
             ..Limits::default()

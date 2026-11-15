@@ -42,6 +42,18 @@ fn add_live(n: usize) {
     LIVE.with(|live| live.set(live.get().saturating_add(n)));
 }
 
+/// Counts one more item alive if that keeps the count since `base` within `max`; `false` otherwise.
+pub(crate) fn add_live_within(base: usize, max: usize) -> bool {
+    LIVE.with(|live| {
+        let n = live.get();
+        let ok = n.saturating_sub(base) < max;
+        if ok {
+            live.set(n + 1);
+        }
+        ok
+    })
+}
+
 /// The items of an array or dictionary. They count as alive from when they are added until the container is
 /// dropped, wherever that happens, so the limit on parsed values ([`Meter`]) measures memory in use and no
 /// caller has to give anything back. A clone counts again: it is a copy.
@@ -60,7 +72,6 @@ impl<T> Items<T> {
         if !meter.take_value() {
             return false;
         }
-        add_live(1);
         self.0.push(item);
         true
     }
@@ -83,7 +94,9 @@ impl<T: Clone> Clone for Items<T> {
 impl<T> Drop for Items<T> {
     fn drop(&mut self) {
         let n = self.0.len();
-        LIVE.with(|live| live.set(live.get().saturating_sub(n)));
+        if n > 0 {
+            LIVE.with(|live| live.set(live.get().saturating_sub(n)));
+        }
     }
 }
 
@@ -142,7 +155,8 @@ pub(crate) struct Indirect {
 pub(crate) struct Lexer<'a> {
     data: &'a [u8],
     pos: usize,
-    /// Counts every value built, so that parsing stops before a huge array or dictionary exhausts memory.
+    /// Checks the limit on items alive for every item added, so that parsing stops before a huge array or
+    /// dictionary exhausts memory.
     meter: &'a Meter,
 }
 

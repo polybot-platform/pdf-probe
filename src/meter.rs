@@ -6,7 +6,7 @@
 //! One unit is roughly a nanosecond of work on a modern core, so the numbers read as time, but the count does
 //! not depend on the machine: the same input costs the same everywhere, which keeps tests and the differential
 //! gate reproducible. The weights below are measured, rough, and relative to each other.
-use crate::lexer::live_items;
+use crate::lexer::{add_live_within, live_items};
 use crate::{Failure, Limit};
 use std::cell::Cell;
 
@@ -53,18 +53,32 @@ impl Meter {
         }
     }
 
-    /// Limits the number of parsed values to `max_values`.
+    /// Limits the items of arrays and dictionaries alive at once to `max_values`.
     pub fn with_max_values(self, max_values: usize) -> Meter {
         Meter { max_values, ..self }
     }
 
-    /// Whether one more value may be alive; `false` once that would pass the limit, and the parser then stops
-    /// at once. The caller adds the value to the live count.
+    /// Counts one more item alive, if the limit allows it; `false` (and nothing counted) otherwise, and the
+    /// parser then stops at once.
     pub fn take_value(&self) -> bool {
-        if live_items().saturating_sub(self.base) >= self.max_values {
+        if !self.values_hit.get() && !add_live_within(self.base, self.max_values) {
             self.values_hit.set(true);
         }
         !self.values_hit.get()
+    }
+
+    /// `Err` once the limit was passed, or once the items alive pass it now (copies are counted without a
+    /// check when they are made). Parse sites call this, so that hitting the limit is reported as the limit
+    /// rather than as an unreadable object.
+    pub fn check_values(&self) -> Result<(), Failure> {
+        if live_items().saturating_sub(self.base) > self.max_values {
+            self.values_hit.set(true);
+        }
+        if self.values_hit.get() {
+            Err(Failure::LimitExceeded(Limit::Values))
+        } else {
+            Ok(())
+        }
     }
 
     /// Whether the parsed-value limit was ever passed. Every parse fails from then on, whatever the caller made

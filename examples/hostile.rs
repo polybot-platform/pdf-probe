@@ -49,6 +49,7 @@ fn main() {
     let limits = Limits {
         max_pages: 1_000_000,
         max_work,
+        max_values: usize::MAX,
         ..Limits::default()
     };
     let t = Instant::now();

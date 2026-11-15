@@ -30,10 +30,13 @@ pub(crate) mod cost {
 pub(crate) struct Meter {
     used: Cell<u64>,
     max: u64,
-    /// Parsed values built so far, and the most allowed ([`Limit::Values`](crate::Limit::Values)). Work bounds
-    /// time; this bounds memory, since a small compressed stream can inflate to millions of tiny values.
+    /// Parsed values alive at once, and the most allowed ([`Limit::Values`](crate::Limit::Values)). Work bounds
+    /// time; this bounds memory, since a small compressed stream can inflate to millions of tiny values. Code
+    /// that parses and then drops objects gives their values back with [`release_values`](Self::release_values).
     values: Cell<usize>,
     max_values: usize,
+    /// Set once the limit is passed, and never cleared, so giving values back cannot hide it.
+    values_hit: Cell<bool>,
 }
 
 impl Meter {
@@ -44,6 +47,7 @@ impl Meter {
             max,
             values: Cell::new(0),
             max_values: usize::MAX,
+            values_hit: Cell::new(false),
         }
     }
 
@@ -52,17 +56,31 @@ impl Meter {
         Meter { max_values, ..self }
     }
 
-    /// Counts one parsed value. `false` once the total passes the limit; the parser then stops at once.
+    /// Counts one parsed value. `false` once the values alive pass the limit; the parser then stops at once.
     pub fn take_value(&self) -> bool {
         let values = self.values.get().saturating_add(1);
         self.values.set(values);
-        values <= self.max_values
+        if values > self.max_values {
+            self.values_hit.set(true);
+        }
+        !self.values_hit.get()
     }
 
-    /// Whether the parsed-value limit was passed. Every parse fails from then on, whatever the caller made of
-    /// the failure, so [`probe`](crate::probe) reports the limit rather than that failure.
+    /// The values counted as alive, to pass to [`release_values`](Self::release_values) later.
+    pub fn values(&self) -> usize {
+        self.values.get()
+    }
+
+    /// Gives back every value counted since `mark`, once the objects they belong to are dropped. Objects the
+    /// shared cache keeps are given back too: the cache has its own bound.
+    pub fn release_values(&self, mark: usize) {
+        self.values.set(self.values.get().min(mark));
+    }
+
+    /// Whether the parsed-value limit was ever passed. Every parse fails from then on, whatever the caller made
+    /// of the failure, so [`probe`](crate::probe) reports the limit rather than that failure.
     pub fn values_exceeded(&self) -> bool {
-        self.values.get() > self.max_values
+        self.values_hit.get()
     }
 
     /// Spends `units`. `Err` once the total passes the budget.
@@ -112,5 +130,19 @@ mod tests {
         assert!(m.values_exceeded());
         assert!(!m.take_value());
         assert!(Meter::new(u64::MAX).take_value());
+    }
+
+    #[test]
+    fn released_values_can_be_taken_again_but_a_hit_stays() {
+        let m = Meter::new(u64::MAX).with_max_values(2);
+        let mark = m.values();
+        assert!(m.take_value() && m.take_value());
+        m.release_values(mark);
+        assert_eq!(m.values(), 0);
+        assert!(m.take_value() && m.take_value());
+        assert!(!m.take_value());
+        m.release_values(mark);
+        assert!(m.values_exceeded());
+        assert!(!m.take_value());
     }
 }

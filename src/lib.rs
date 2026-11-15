@@ -40,10 +40,11 @@ pub struct Limits {
     pub max_xref_sections: usize,
     /// Total bytes inflated from all streams read ([`Limit::Decompressed`]).
     pub max_decompressed: usize,
-    /// Values (numbers, names, strings, arrays, dictionaries, ...) parsed in the whole call ([`Limit::Values`]).
+    /// Parsed values (numbers, names, strings, arrays, dictionaries, ...) alive at once ([`Limit::Values`]).
     /// Bounds memory: a small compressed stream can inflate to millions of tiny values. Each costs a few dozen
-    /// bytes, so the default allows on the order of 100 MB; real files parse far fewer (a 10,000-page file
-    /// about 500,000).
+    /// bytes, so the default allows on the order of 100 MB, plus the shared-object cache, which has its own
+    /// bound. Values parsed for one page are given back once the page is read, so the page count does not
+    /// add up against this; real files keep at most a few tens of thousands alive.
     pub max_values: usize,
 }
 
@@ -419,8 +420,10 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     };
     let result = match first {
         Ok(probe) => Ok(probe),
-        // Past the value limit every parse fails, so a rescan could not find anything.
+        // Past the value limit every parse fails, so skip a rescan of the whole file that cannot succeed.
         Err(Fault { recover: true, .. }) if !meter.values_exceeded() => {
+            // The first pass's objects are dropped with it.
+            meter.release_values(0);
             recover(data, limits, &meter).and_then(|xref| {
                 run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
             })
@@ -521,7 +524,10 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
     let mut candidate = None;
     let mut chosen = None;
     for trailer in &scan.trailers {
-        let Some(valid_pages) = trailer_candidate(&mut doc, trailer)? else {
+        let mark = meter.values();
+        let valid_pages = trailer_candidate(&mut doc, trailer)?;
+        meter.release_values(mark); // what it resolved is dropped; the trailer itself is counted in the scan
+        let Some(valid_pages) = valid_pages else {
             continue;
         };
         if valid_pages
@@ -538,6 +544,7 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
         let mut nums: Vec<u32> = doc.xref.entries.keys().copied().collect();
         nums.sort_unstable();
         for num in nums.into_iter().take(limits.max_objects) {
+            let mark = meter.values();
             match doc.fetch(num) {
                 Ok(Obj::Dict(d)) if d.get(b"Root").is_some() => {
                     trailer = Some(d);
@@ -546,6 +553,7 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
                 Err(e @ Failure::LimitExceeded(_)) => return Err(e),
                 _ => {}
             }
+            meter.release_values(mark); // every object is fetched once and dropped
         }
     }
     let Some(trailer) = trailer else {
@@ -594,23 +602,9 @@ mod tests {
         )
     }
 
-    /// One page whose `/MediaBox` is an indirect array of `items` zeros.
-    fn huge_media_box(items: usize) -> Vec<u8> {
-        let array = format!("[{}]", "0 ".repeat(items));
-        build(
-            &[
-                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
-                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-                (3, "<< /Type /Page /Parent 2 0 R /MediaBox 4 0 R >>"),
-                (4, &array),
-            ],
-            1,
-        )
-    }
-
     #[test]
     fn parsed_values_are_limited() {
-        let pdf = huge_media_box(10_000);
+        let pdf = big_inherited_box(1, 10_000);
         assert_eq!(probe(&pdf, &Limits::default()).unwrap().pages, 1);
         let limits = Limits {
             max_values: 5_000,
@@ -623,9 +617,39 @@ mod tests {
     }
 
     #[test]
+    fn values_parsed_for_each_page_are_given_back() {
+        // 300 pages of about 110 values each: 33,000 parsed in total, but only one page alive at a time.
+        let annots = format!("[{}]", "0 ".repeat(100));
+        let pages: Vec<(u32, String)> = (0..300)
+            .map(|i| {
+                let page = format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots} >>"
+                );
+                (3 + i, page)
+            })
+            .collect();
+        let kids: String = (0..300).map(|i| format!("{} 0 R ", 3 + i)).collect();
+        let mut objects = vec![
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string()),
+            (2, format!("<< /Type /Pages /Kids [{kids}] /Count 300 >>")),
+        ];
+        objects.extend(pages);
+        let objects: Vec<(u32, &str)> = objects.iter().map(|(n, b)| (*n, b.as_str())).collect();
+        let pdf = build(&objects, 1);
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        assert_eq!(probe(&pdf, &limits).unwrap().pages, 300);
+        // A damaged copy is read twice, by the first pass and by the rescan; neither counts against the other.
+        let repaired = probe(&with_startxref(pdf, "1"), &limits).unwrap();
+        assert_eq!((repaired.pages, repaired.repaired), (300, true));
+    }
+
+    #[test]
     fn the_value_limit_is_reported_when_the_rescan_hits_it() {
         // A wrong startxref sends the call to the rescan, which skips objects it cannot parse.
-        let pdf = with_startxref(huge_media_box(10_000), "1");
+        let pdf = with_startxref(big_inherited_box(1, 10_000), "1");
         let p = probe(&pdf, &Limits::default()).unwrap();
         assert!(p.repaired);
         let limits = Limits {
@@ -988,17 +1012,11 @@ mod tests {
         let pdf = big_inherited_box(100, SHARED_BUDGET + 100_000);
         let budget = Limits {
             max_work: 100_000_000,
-            max_values: usize::MAX,
             ..Limits::default()
         };
         assert_eq!(
             probe(&pdf, &budget),
             Err(Failure::LimitExceeded(Limit::Work))
-        );
-        // With default limits the parsed values of the repeated parses run out first.
-        assert_eq!(
-            probe(&pdf, &Limits::default()),
-            Err(Failure::LimitExceeded(Limit::Values))
         );
     }
 

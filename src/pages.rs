@@ -172,6 +172,9 @@ fn walk(
             break;
         }
         doc.meter.charge(cost::NODE)?;
+        // What is parsed for this kid's subtree is dropped once it is done, so the value limit counts only the
+        // current path through the tree, however many pages there are.
+        let mark = doc.meter.values();
         match kid {
             Obj::Ref(n, _) => {
                 if path.contains(n) {
@@ -206,6 +209,7 @@ fn walk(
             )?,
             _ => return fail("a page tree kid is not a reference"),
         }
+        doc.meter.release_values(mark);
     }
     Ok(())
 }

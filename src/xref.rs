@@ -486,10 +486,12 @@ pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, 
                 None => true,
                 Some(_) if gens.get(&num) == Some(&gen_) => {
                     // Do not let a later copy that fails at once replace a good one (pdf.js issue13783).
+                    let mark = meter.values();
                     let mut lx = Lexer::new(data, start, meter);
-                    let parsed = lx.parse_obj();
+                    let parsed = lx.parse_obj().is_some();
                     meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
-                    parsed.is_some()
+                    meter.release_values(mark); // only checked, then dropped
+                    parsed
                 }
                 Some(_) => false,
             };

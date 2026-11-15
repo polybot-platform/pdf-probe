@@ -40,11 +40,10 @@ pub struct Limits {
     pub max_xref_sections: usize,
     /// Total bytes inflated from all streams read ([`Limit::Decompressed`]).
     pub max_decompressed: usize,
-    /// Parsed values (numbers, names, strings, arrays, dictionaries, ...) alive at once ([`Limit::Values`]).
-    /// Bounds memory: a small compressed stream can inflate to millions of tiny values. Each costs a few dozen
-    /// bytes, so the default allows on the order of 100 MB, plus the shared-object cache, which has its own
-    /// bound. Values parsed for one page are given back once the page is read, so the page count does not
-    /// add up against this; real files keep at most a few tens of thousands alive.
+    /// Items of parsed arrays and dictionaries alive at once ([`Limit::Values`]). Bounds memory: a small
+    /// compressed stream can inflate to millions of tiny values. Each costs a few dozen bytes, so the default
+    /// allows on the order of 100 MB. Values count only while the object holding them is alive, so a long
+    /// document does not add up against this; real files keep at most a few tens of thousands alive.
     pub max_values: usize,
 }
 
@@ -422,8 +421,6 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
         Ok(probe) => Ok(probe),
         // Past the value limit every parse fails, so skip a rescan of the whole file that cannot succeed.
         Err(Fault { recover: true, .. }) if !meter.values_exceeded() => {
-            // The first pass's objects are dropped with it.
-            meter.release_values(0);
             recover(data, limits, &meter).and_then(|xref| {
                 run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
             })
@@ -524,10 +521,7 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
     let mut candidate = None;
     let mut chosen = None;
     for trailer in &scan.trailers {
-        let mark = meter.values();
-        let valid_pages = trailer_candidate(&mut doc, trailer)?;
-        meter.release_values(mark); // what it resolved is dropped; the trailer itself is counted in the scan
-        let Some(valid_pages) = valid_pages else {
+        let Some(valid_pages) = trailer_candidate(&mut doc, trailer)? else {
             continue;
         };
         if valid_pages
@@ -544,7 +538,6 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
         let mut nums: Vec<u32> = doc.xref.entries.keys().copied().collect();
         nums.sort_unstable();
         for num in nums.into_iter().take(limits.max_objects) {
-            let mark = meter.values();
             match doc.fetch(num) {
                 Ok(Obj::Dict(d)) if d.get(b"Root").is_some() => {
                     trailer = Some(d);
@@ -553,7 +546,6 @@ fn recover(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Xref, Failure>
                 Err(e @ Failure::LimitExceeded(_)) => return Err(e),
                 _ => {}
             }
-            meter.release_values(mark); // every object is fetched once and dropped
         }
     }
     let Some(trailer) = trailer else {
@@ -617,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn values_parsed_for_each_page_are_given_back() {
+    fn values_of_objects_already_dropped_do_not_count() {
         // 300 pages of about 110 values each: 33,000 parsed in total, but only one page alive at a time.
         let annots = format!("[{}]", "0 ".repeat(100));
         let pages: Vec<(u32, String)> = (0..300)
@@ -859,6 +851,106 @@ mod tests {
         out.extend(z);
         out.extend(format!("\nendstream\nendobj\nstartxref\n{xs}\n%%EOF\n").bytes());
         out
+    }
+
+    #[test]
+    fn values_of_incremental_trailers_dropped_do_not_count() {
+        // Ten updates, each with a trailer holding 1,000 extra values: 10,000 parsed, a few thousand alive.
+        let mut pdf = one_page("/MediaBox [0 0 612 792]");
+        let junk = format!("[{}]", "0 ".repeat(1_000));
+        for update in 0..10 {
+            let prev = {
+                let at = pdf.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+                let end = pdf[at..].iter().position(|b| *b == b'\n').unwrap();
+                String::from_utf8(pdf[at..at + end].to_vec()).unwrap()
+            };
+            let page = pdf.len();
+            pdf.extend(
+                format!(
+                    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 {}] >>\nendobj\n",
+                    700 + update
+                )
+                .bytes(),
+            );
+            let xref = pdf.len();
+            pdf.extend(
+                format!(
+                    "xref\n3 1\n{page:010} 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R /Prev {prev} /Junk {junk} >>\nstartxref\n{xref}\n%%EOF\n"
+                )
+                .bytes(),
+            );
+        }
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        let p = probe(&pdf, &limits).unwrap();
+        assert_eq!(p.sizes[0].height, 709.0);
+        assert!(!p.repaired);
+    }
+
+    #[test]
+    fn values_of_object_stream_headers_dropped_do_not_count() {
+        // The catalog and the page tree root sit in two object streams whose headers hold 1,000 extra values
+        // each, both read before the page tree: 2,000 parsed, about 1,000 alive at once.
+        let junk = format!("[{}]", "0 ".repeat(1_000));
+        let mut out = b"%PDF-1.5\n".to_vec();
+        let page = out.len();
+        out.extend(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>\nendobj\n");
+        let mut streams = Vec::new();
+        for (num, body) in [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        ] {
+            let header = format!("{num} 0 ");
+            let z = stored_zlib(format!("{header}{body}").as_bytes());
+            streams.push(out.len());
+            out.extend(
+                format!(
+                    "{} 0 obj\n<< /Type /ObjStm /N 1 /First {} /Filter /FlateDecode /Length {} /Junk {junk} >>\nstream\n",
+                    3 + num,
+                    header.len(),
+                    z.len()
+                )
+                .bytes(),
+            );
+            out.extend(z);
+            out.extend(b"\nendstream\nendobj\n");
+        }
+        let xs = out.len();
+        let row = |t: u8, a: usize, b: u8| [t, (a >> 8) as u8, a as u8, b];
+        let rows: Vec<u8> = [
+            row(2, 4, 0),
+            row(2, 5, 0),
+            row(1, page, 0),
+            row(1, streams[0], 0),
+            row(1, streams[1], 0),
+            row(1, xs, 0),
+        ]
+        .concat();
+        let z = stored_zlib(&rows);
+        out.extend(
+            format!(
+                "6 0 obj\n<< /Type /XRef /Size 7 /W [1 2 1] /Index [1 6] /Root 1 0 R /Filter /FlateDecode /Length {} >>\nstream\n",
+                z.len()
+            )
+            .bytes(),
+        );
+        out.extend(z);
+        out.extend(format!("\nendstream\nendobj\nstartxref\n{xs}\n%%EOF\n").bytes());
+        let limits = Limits {
+            max_values: 1_500,
+            ..Limits::default()
+        };
+        assert_eq!(probe(&out, &limits).unwrap().pages, 1);
+        let tight = Limits {
+            max_values: 900,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&out, &tight),
+            Err(Failure::LimitExceeded(Limit::Values))
+        );
     }
 
     #[test]

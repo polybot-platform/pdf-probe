@@ -1,6 +1,8 @@
 //! A small PDF object lexer and parser. Bounded: nesting depth is limited, and nothing here recurses on
-//! untrusted structure except `parse_obj`, which stops at `MAX_NEST`. Every value built is counted by the
-//! [`Meter`], and parsing stops once the call's limit on parsed values is passed.
+//! untrusted structure except `parse_obj`, which stops at `MAX_NEST`. The items of every array and dictionary
+//! are counted while they are alive ([`Items`]), and parsing stops once the call's limit on them is passed.
+
+use std::cell::Cell;
 
 use crate::meter::Meter;
 use std::rc::Rc;
@@ -17,13 +19,80 @@ pub(crate) enum Obj {
     Name(Vec<u8>),
     Str(Vec<u8>),
     /// Shared, so that cloning a large array (an inherited `/MediaBox`, say) copies a pointer.
-    Array(Rc<Vec<Obj>>),
+    Array(Rc<Items<Obj>>),
     Dict(Dict),
     Ref(u32, u16),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct Dict(pub Vec<(Vec<u8>, Obj)>);
+pub(crate) struct Dict(pub Items<(Vec<u8>, Obj)>);
+
+thread_local! {
+    /// Items of arrays and dictionaries alive on this thread. Parsed objects hold `Rc`s, so they never leave
+    /// the thread, and none outlive the call that parsed them.
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The items of arrays and dictionaries alive on this thread.
+pub(crate) fn live_items() -> usize {
+    LIVE.with(Cell::get)
+}
+
+fn add_live(n: usize) {
+    LIVE.with(|live| live.set(live.get().saturating_add(n)));
+}
+
+/// The items of an array or dictionary. They count as alive from when they are added until the container is
+/// dropped, wherever that happens, so the limit on parsed values ([`Meter`]) measures memory in use and no
+/// caller has to give anything back. A clone counts again: it is a copy.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Items<T>(Vec<T>);
+
+impl<T> Default for Items<T> {
+    fn default() -> Self {
+        Items(Vec::new())
+    }
+}
+
+impl<T> Items<T> {
+    /// Adds `item` if the meter allows one more value alive; `false` (and nothing added) otherwise.
+    pub fn push(&mut self, item: T, meter: &Meter) -> bool {
+        if !meter.take_value() {
+            return false;
+        }
+        add_live(1);
+        self.0.push(item);
+        true
+    }
+}
+
+/// Items built by the library itself rather than parsed: counted, but not checked against the limit.
+impl<T> From<Vec<T>> for Items<T> {
+    fn from(items: Vec<T>) -> Self {
+        add_live(items.len());
+        Items(items)
+    }
+}
+
+impl<T: Clone> Clone for Items<T> {
+    fn clone(&self) -> Self {
+        Items::from(self.0.clone())
+    }
+}
+
+impl<T> Drop for Items<T> {
+    fn drop(&mut self) {
+        let n = self.0.len();
+        LIVE.with(|live| live.set(live.get().saturating_sub(n)));
+    }
+}
+
+impl<T> std::ops::Deref for Items<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
 
 impl Dict {
     /// The last entry wins when a key is repeated, as in pdf.js.
@@ -139,7 +208,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn parse_nested(&mut self, depth: usize) -> Option<Obj> {
-        if depth > MAX_NEST || !self.meter.take_value() {
+        if depth > MAX_NEST {
             return None;
         }
         self.skip_ws();
@@ -159,14 +228,17 @@ impl<'a> Lexer<'a> {
             }
             b'[' => {
                 self.pos += 1;
-                let mut items = Vec::new();
+                let mut items = Items::default();
                 loop {
                     self.skip_ws();
                     if self.peek()? == b']' {
                         self.pos += 1;
                         break;
                     }
-                    items.push(self.parse_nested(depth + 1)?);
+                    let item = self.parse_nested(depth + 1)?;
+                    if !items.push(item, self.meter) {
+                        return None;
+                    }
                 }
                 Some(Obj::Array(Rc::new(items)))
             }
@@ -186,7 +258,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_dict_body(&mut self, depth: usize) -> Option<Dict> {
-        let mut entries = Vec::new();
+        let mut entries = Items::default();
         loop {
             self.skip_ws();
             if self.data[self.pos.min(self.data.len())..].starts_with(b">>") {
@@ -197,7 +269,9 @@ impl<'a> Lexer<'a> {
                 return None;
             };
             let value = self.parse_nested(depth + 1)?;
-            entries.push((key, value));
+            if !entries.push((key, value), self.meter) {
+                return None;
+            }
         }
     }
 
@@ -439,14 +513,41 @@ mod tests {
 
     #[test]
     fn parsing_stops_as_soon_as_the_value_limit_is_passed() {
-        // The array and its five items are six values.
-        let meter = Meter::new(u64::MAX).with_max_values(6);
-        assert!(Lexer::new(b"[0 0 0 0 0]", 0, &meter).parse_obj().is_some());
         let meter = Meter::new(u64::MAX).with_max_values(5);
-        let mut lx = Lexer::new(b"[0 0 0 0 0] trailing", 0, &meter);
+        assert!(Lexer::new(b"[0 0 0 0 0]", 0, &meter).parse_obj().is_some());
+        let meter = Meter::new(u64::MAX).with_max_values(4);
+        let mut lx = Lexer::new(b"[0 0 0 0 0 0 0 0 0 0]", 0, &meter);
         assert!(lx.parse_obj().is_none());
         assert!(meter.values_exceeded());
-        // It stopped at the value that passed the limit, before the end of the array.
-        assert!(lx.pos() < 10);
+        // It stopped at the fifth item, which passed the limit, well before the end of the array.
+        assert_eq!(lx.pos(), 10);
+    }
+
+    #[test]
+    fn values_count_while_their_object_is_alive() {
+        let base = live_items();
+        let meter = Meter::new(u64::MAX).with_max_values(8);
+        let first = Lexer::new(b"<< /A [1 2 3] >>", 0, &meter)
+            .parse_obj()
+            .unwrap();
+        assert_eq!(live_items() - base, 4); // one entry, three items
+        let copy = first.clone();
+        assert_eq!(
+            live_items() - base,
+            5,
+            "the entry is copied, the array shared"
+        );
+        drop((first, copy));
+        assert_eq!(live_items(), base);
+        // With the first object dropped, the same budget fits it again, twice over.
+        let a = Lexer::new(b"<< /A [1 2 3] >>", 0, &meter).parse_obj();
+        let b = Lexer::new(b"<< /A [1 2 3] >>", 0, &meter).parse_obj();
+        assert!(a.is_some() && b.is_some());
+        // A third alive at once does not.
+        assert!(
+            Lexer::new(b"<< /A [1 2 3] >>", 0, &meter)
+                .parse_obj()
+                .is_none()
+        );
     }
 }

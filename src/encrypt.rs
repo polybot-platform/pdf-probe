@@ -100,9 +100,11 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
             && let Obj::Dict(c) = doc.resolve(c)?
         {
             // The values may be indirect; resolve them so the dictionary is self-contained.
-            for (k, val) in c.0 {
-                cf.0.push((k, doc.resolve(&val)?));
+            let mut entries = Vec::with_capacity(c.0.len());
+            for (k, val) in c.0.iter() {
+                entries.push((k.clone(), doc.resolve(val)?));
             }
+            cf = Dict(entries.into());
         }
         stmf_name = name_of(d.get(b"StmF")).unwrap_or(b"Identity").to_vec();
         strf_name = name_of(d.get(b"StrF")).unwrap_or(b"Identity").to_vec();
@@ -430,7 +432,7 @@ mod tests {
     }
 
     fn dict_with_ue(ue: Vec<u8>) -> Dict {
-        Dict(vec![(b"UE".to_vec(), Obj::Str(ue))])
+        Dict(vec![(b"UE".to_vec(), Obj::Str(ue))].into())
     }
 
     #[test]

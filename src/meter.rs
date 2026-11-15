@@ -6,6 +6,7 @@
 //! One unit is roughly a nanosecond of work on a modern core, so the numbers read as time, but the count does
 //! not depend on the machine: the same input costs the same everywhere, which keeps tests and the differential
 //! gate reproducible. The weights below are measured, rough, and relative to each other.
+use crate::lexer::live_items;
 use crate::{Failure, Limit};
 use std::cell::Cell;
 
@@ -30,12 +31,13 @@ pub(crate) mod cost {
 pub(crate) struct Meter {
     used: Cell<u64>,
     max: u64,
-    /// Parsed values alive at once, and the most allowed ([`Limit::Values`](crate::Limit::Values)). Work bounds
-    /// time; this bounds memory, since a small compressed stream can inflate to millions of tiny values. Code
-    /// that parses and then drops objects gives their values back with [`release_values`](Self::release_values).
-    values: Cell<usize>,
+    /// The most items of arrays and dictionaries alive at once ([`Limit::Values`](crate::Limit::Values)), counted
+    /// by the containers themselves ([`Items`](crate::lexer::Items)) from `base`, the count when the call began.
+    /// Work bounds time; this bounds memory, since a small compressed stream can inflate to millions of tiny
+    /// values.
     max_values: usize,
-    /// Set once the limit is passed, and never cleared, so giving values back cannot hide it.
+    base: usize,
+    /// Set once the limit is passed, and never cleared, so that values dropped since cannot hide it.
     values_hit: Cell<bool>,
 }
 
@@ -45,8 +47,8 @@ impl Meter {
         Meter {
             used: Cell::new(0),
             max,
-            values: Cell::new(0),
             max_values: usize::MAX,
+            base: live_items(),
             values_hit: Cell::new(false),
         }
     }
@@ -56,25 +58,13 @@ impl Meter {
         Meter { max_values, ..self }
     }
 
-    /// Counts one parsed value. `false` once the values alive pass the limit; the parser then stops at once.
+    /// Whether one more value may be alive; `false` once that would pass the limit, and the parser then stops
+    /// at once. The caller adds the value to the live count.
     pub fn take_value(&self) -> bool {
-        let values = self.values.get().saturating_add(1);
-        self.values.set(values);
-        if values > self.max_values {
+        if live_items().saturating_sub(self.base) >= self.max_values {
             self.values_hit.set(true);
         }
         !self.values_hit.get()
-    }
-
-    /// The values counted as alive, to pass to [`release_values`](Self::release_values) later.
-    pub fn values(&self) -> usize {
-        self.values.get()
-    }
-
-    /// Gives back every value counted since `mark`, once the objects they belong to are dropped. Objects the
-    /// shared cache keeps are given back too: the cache has its own bound.
-    pub fn release_values(&self, mark: usize) {
-        self.values.set(self.values.get().min(mark));
     }
 
     /// Whether the parsed-value limit was ever passed. Every parse fails from then on, whatever the caller made
@@ -122,27 +112,17 @@ mod tests {
     }
 
     #[test]
-    fn counts_parsed_values_up_to_the_limit() {
+    fn values_alive_are_limited_and_a_hit_stays() {
+        use crate::lexer::Items;
         let m = Meter::new(u64::MAX).with_max_values(2);
-        assert!(m.take_value() && m.take_value());
-        assert!(!m.values_exceeded());
-        assert!(!m.take_value());
+        let mut items = Items::default();
+        assert!(items.push(1, &m) && items.push(2, &m));
+        assert!(!items.push(3, &m));
+        assert_eq!(items.len(), 2);
+        drop(items);
+        // Dropping gives the values back, but the hit is remembered.
+        assert!(!Items::default().push(1, &m));
         assert!(m.values_exceeded());
-        assert!(!m.take_value());
-        assert!(Meter::new(u64::MAX).take_value());
-    }
-
-    #[test]
-    fn released_values_can_be_taken_again_but_a_hit_stays() {
-        let m = Meter::new(u64::MAX).with_max_values(2);
-        let mark = m.values();
-        assert!(m.take_value() && m.take_value());
-        m.release_values(mark);
-        assert_eq!(m.values(), 0);
-        assert!(m.take_value() && m.take_value());
-        assert!(!m.take_value());
-        m.release_values(mark);
-        assert!(m.values_exceeded());
-        assert!(!m.take_value());
+        assert!(Items::default().push(1, &Meter::new(u64::MAX).with_max_values(1)));
     }
 }

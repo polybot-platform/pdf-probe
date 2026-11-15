@@ -82,17 +82,19 @@ function prepare(
 
 type Run = (bytes: Uint8Array, maxPages: number, maxInputBytes: number, maxWorkMillions: number) => ProbeResult
 
-function wrap(engine: 'native' | 'wasm', run: Run | undefined, release: (() => void) | undefined): Probe {
+function wrap(engine: 'native' | 'wasm', run: Run, release: () => void): Probe {
+  // Dropped on close, so the engine and its retained buffers can be collected even if the probe is kept.
+  let live: { run: Run; release: () => void } | undefined = { run, release }
   return {
     engine,
     check(pdf, options) {
-      if (!run) throw new Error('this probe is closed')
-      return run(...prepare(pdf, options))
+      if (!live) throw new Error('this probe is closed')
+      return live.run(...prepare(pdf, options))
     },
     close() {
-      if (run) release?.()
-      run = undefined
-      release = undefined
+      if (!live) return
+      live.release()
+      live = undefined
     },
   }
 }

@@ -45,10 +45,15 @@ fn name_of(o: Option<&Obj>) -> Option<&[u8]> {
 }
 
 fn method_of(cf: &HashMap<Vec<u8>, Obj>, name: &[u8]) -> Method {
+    filter_method(name, cf.get(name))
+}
+
+/// The method of the crypt filter `name`, defined by `handler`. `/Identity` is always no encryption.
+fn filter_method(name: &[u8], handler: Option<&Obj>) -> Method {
     if name == b"Identity" {
         return Method::Identity;
     }
-    match cf.get(name) {
+    match handler {
         Some(Obj::Dict(d)) => match name_of(d.get(b"CFM")) {
             Some(b"V2") => Method::Rc4,
             Some(b"AESV2") => Method::AesV2,
@@ -94,29 +99,28 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
 
     // Crypt filters (version 4 and 5).
     let mut cf = HashMap::new();
-    let (mut stmf_name, mut strf_name, mut eff_name) =
-        (b"Identity".to_vec(), b"Identity".to_vec(), None);
+    let (mut stmf_name, mut strf_name, mut eff_name): (&[u8], &[u8], _) =
+        (b"Identity", b"Identity", None);
     if v >= 4 {
         if let Some(c) = d.get(b"CF")
             && let Obj::Dict(c) = doc.resolve(c)?
         {
-            // The values may be indirect; resolve them so the dictionary is self-contained.
+            // The values may be indirect; resolve them so the dictionary is self-contained. Parsing `/CF`
+            // already paid for its size and building the index is linear in it, so the work count is the
+            // same as before the index existed.
             for (k, val) in c.0.iter() {
-                doc.meter.charge(cost::NODE + cost::SCAN * k.len() as u64)?;
                 cf.insert(k.clone(), doc.resolve(val)?);
             }
         }
-        stmf_name = name_of(d.get(b"StmF")).unwrap_or(b"Identity").to_vec();
-        strf_name = name_of(d.get(b"StrF")).unwrap_or(b"Identity").to_vec();
-        eff_name = name_of(d.get(b"EFF")).map(<[u8]>::to_vec);
+        stmf_name = name_of(d.get(b"StmF")).unwrap_or(b"Identity");
+        strf_name = name_of(d.get(b"StrF")).unwrap_or(b"Identity");
+        eff_name = name_of(d.get(b"EFF"));
     }
     let stmf = if v >= 4 {
-        method_of(&cf, &stmf_name)
+        method_of(&cf, stmf_name)
     } else {
         Method::Rc4
     };
-    let filters = cf.keys().map(|k| (k.clone(), method_of(&cf, k))).collect();
-
     let id0 = match doc.xref.trailer.get(b"ID") {
         Some(Obj::Array(a)) => match a.first() {
             Some(Obj::Str(s)) => &s[..],
@@ -134,7 +138,7 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
             if v <= 3 {
                 bits = 40;
             } else {
-                let handler = match cf.get(&stmf_name) {
+                let handler = match cf.get(stmf_name) {
                     Some(Obj::Dict(h)) => h.get(b"Length").and_then(Obj::as_int),
                     _ => return fail("invalid key length"),
                 };
@@ -174,15 +178,15 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
         return Ok(Some(Crypto {
             key: Some(key),
             stmf,
-            filters,
+            filters: index_filters(cf),
         }));
     }
     // The password check failed. pdf.js lets a file through when the default filters are Identity and only
     // embedded files (/EFF, opened on demand) are encrypted; nothing this crate reads is encrypted then.
     let eff_opens_on_demand = v >= 4
         && stmf == Method::Identity
-        && method_of(&cf, &strf_name) == Method::Identity
-        && match cf.get(eff_name.as_deref().unwrap_or(&stmf_name)) {
+        && method_of(&cf, strf_name) == Method::Identity
+        && match cf.get(eff_name.unwrap_or(stmf_name)) {
             Some(Obj::Dict(h)) => name_of(h.get(b"AuthEvent")) == Some(b"EFOpen"),
             _ => false,
         };
@@ -190,10 +194,21 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
         return Ok(Some(Crypto {
             key: None,
             stmf,
-            filters,
+            filters: index_filters(cf),
         }));
     }
     fail("a password is required")
+}
+
+/// The method of each named crypt filter, for streams that pick one. Takes the resolved `/CF` so that its
+/// keys move into the index instead of being copied.
+fn index_filters(cf: HashMap<Vec<u8>, Obj>) -> HashMap<Vec<u8>, Method> {
+    cf.into_iter()
+        .map(|(name, handler)| {
+            let method = filter_method(&name, Some(&handler));
+            (name, method)
+        })
+        .collect()
 }
 
 /// Algorithm 2 and the user-password check (algorithms 4 and 5), revisions 2 to 4, empty password.
@@ -413,7 +428,8 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::xref::Xref;
 
-    fn deferred_crypto(filters: &str, budget: u64) -> Result<Crypto, Failure> {
+    /// The crypto for a trailer whose only encrypted content is embedded files, and the work setup used.
+    fn deferred_crypto(filters: &str) -> (Result<Crypto, Failure>, u64) {
         // Only embedded files are encrypted, so no key is needed to inspect the page tree.
         let source = format!(
             "<< /Encrypt << /Filter /Standard /V 4 /R 4 /Length 128 /O <> /U <> \
@@ -425,7 +441,7 @@ mod tests {
             panic!("encryption dictionary");
         };
         let limits = Limits::default();
-        let meter = Meter::new(budget);
+        let meter = Meter::new(u64::MAX);
         let mut doc = Doc::new(
             b"",
             Xref {
@@ -436,7 +452,8 @@ mod tests {
             &limits,
             &meter,
         );
-        setup(&mut doc).map(Option::unwrap)
+        let crypto = setup(&mut doc).map(Option::unwrap);
+        (crypto, meter.used())
     }
 
     #[test]
@@ -444,8 +461,8 @@ mod tests {
         let crypto = deferred_crypto(
             "/Duplicate << /CFM /V2 >> /Duplicate << /CFM /AESV2 >> \
              /Identity << /CFM /AESV3 >> /Unknown null",
-            u64::MAX,
         )
+        .0
         .unwrap();
         assert_eq!(
             crypto.filters.get(b"Duplicate".as_slice()),
@@ -475,15 +492,16 @@ mod tests {
     }
 
     #[test]
-    fn indexing_crypt_filters_spends_work_for_each_entry() {
-        let filters: String = (0..2000)
+    fn indexing_crypt_filters_adds_no_work_beyond_parsing_them() {
+        // Parsing `/CF` is charged by its size; indexing it must not change `Probe.work` for encrypted files.
+        let many: String = (0..20_000)
             .map(|i| format!("/F{i} << /CFM /None >> "))
             .collect();
-        assert!(deferred_crypto(&filters, 100_000).is_ok());
-        assert!(matches!(
-            deferred_crypto(&filters, 1_000),
-            Err(Failure::LimitExceeded(crate::Limit::Work))
-        ));
+        let (few, few_work) = deferred_crypto("");
+        let (many, many_work) = deferred_crypto(&many);
+        assert_eq!(many.unwrap().filters.len(), 20_001);
+        assert_eq!(few.unwrap().filters.len(), 1);
+        assert_eq!(many_work, few_work);
     }
 
     /// A revision 5 (SHA-256) user entry for the empty password and the given file key, as a generator

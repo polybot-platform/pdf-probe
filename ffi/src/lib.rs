@@ -1,6 +1,8 @@
 //! A C ABI for pdf-probe. One function does the work; the host passes the PDF bytes and a buffer, and gets
-//! the answer back in the buffer. There is no allocation across the boundary, no global state, and no way
-//! for a panic to unwind into the host: a panic becomes the `PANIC` status (on native targets).
+//! the answer back in the buffer. There is no allocation across the boundary, no state kept between calls (the
+//! library's only state is a per-thread count of parsed items alive, which is back where it started when a
+//! call returns), and no way for a panic to unwind into the host: a panic becomes the `PANIC` status (on
+//! native targets).
 //!
 //! On `wasm32` the host cannot hand over a pointer into its own memory, so the module also exports
 //! `pdf_probe_alloc` and `pdf_probe_free` to place bytes in its linear memory. Unwinding does not exist
@@ -16,7 +18,7 @@
 //! | 8 | u32 | number of page sizes that follow (status 0), else 0 |
 //! | 12 | u32 | status 0: packed metadata (`bit 0` encrypted, `bit 1` repaired, `bit 2` cropped, `bits 8..16` version major, `bits 16..24` version minor); other statuses: length of the reason text, in bytes |
 //! | 16 | f64 x 2 each | width and height of each page in points |
-//! | after | bytes | the reason, UTF-8 (status 1 and 4), else empty; for status 5 the name of the limit: `inputBytes`, `work`, `objects`, `xrefSections` or `decompressed` |
+//! | after | bytes | the reason, UTF-8 (status 1 and 4), else empty; for status 5 the name of the limit: `inputBytes`, `work`, `objects`, `xrefSections`, `decompressed` or `values` (more may be added) |
 //!
 //! ## Arguments
 //!
@@ -292,6 +294,7 @@ mod tests {
             (pdf_probe::Limit::Objects, "objects"),
             (pdf_probe::Limit::XrefSections, "xrefSections"),
             (pdf_probe::Limit::Decompressed, "decompressed"),
+            (pdf_probe::Limit::Values, "values"),
         ] {
             assert_eq!(
                 &encode(Ok(Err(Failure::LimitExceeded(limit))))[HEADER..],

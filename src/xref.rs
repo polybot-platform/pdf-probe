@@ -136,7 +136,7 @@ fn read_section(
     if offset >= data.len() {
         return fail("xref offset past the end");
     }
-    let mut lx = Lexer::new(data, offset);
+    let mut lx = Lexer::new(data, offset, meter);
     if !lx.eat_keyword(b"xref") {
         return read_xref_stream(data, offset, limits, decoded, meter);
     }
@@ -169,6 +169,7 @@ fn read_section(
         }
     }
     let parsed = lx.parse_obj();
+    meter.check_values()?;
     meter.charge(cost::PARSE * (lx.pos() - offset) as u64)?;
     let Some(Obj::Dict(trailer)) = parsed else {
         return fail("bad trailer");
@@ -203,8 +204,9 @@ fn read_xref_stream(
     decoded: &mut usize,
     meter: &Meter,
 ) -> Result<(Section, Dict), Failure> {
-    let mut lx = Lexer::new(data, offset);
+    let mut lx = Lexer::new(data, offset, meter);
     let parsed = lx.parse_indirect_full();
+    meter.check_values()?;
     meter.charge(cost::SCAN * (lx.pos() - offset) as u64)?;
     let Some(ind) = parsed else {
         return fail("unreadable cross-reference");
@@ -486,8 +488,9 @@ pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, 
                 None => true,
                 Some(_) if gens.get(&num) == Some(&gen_) => {
                     // Do not let a later copy that fails at once replace a good one (pdf.js issue13783).
-                    let mut lx = Lexer::new(data, start);
+                    let mut lx = Lexer::new(data, start, meter);
                     let parsed = lx.parse_obj();
+                    meter.check_values()?;
                     meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
                     parsed.is_some()
                 }
@@ -558,11 +561,12 @@ pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, 
 
     let mut trailers = Vec::new();
     for at in trailer_at {
-        let mut lx = Lexer::new(data, at);
+        let mut lx = Lexer::new(data, at, meter);
         if !lx.eat_keyword(b"trailer") {
             continue;
         }
         let parsed = lx.parse_obj();
+        meter.check_values()?;
         meter.charge(cost::PARSE * (lx.pos() - at) as u64)?;
         if let Some(Obj::Dict(d)) = parsed {
             trailers.push(d);

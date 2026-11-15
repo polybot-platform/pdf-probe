@@ -26,7 +26,7 @@ switch (result.status) {
   case 'tooManyPages': // result.pages
   case 'empty': // well-formed, no pages
   case 'unparseable': // result.reason: damaged, unsupported, or password-protected
-  case 'limitExceeded': // result.limit: 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed'
+  case 'limitExceeded': // result.limit: 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' | 'values'
 }
 ```
 
@@ -63,7 +63,7 @@ A native shared library can be embedded the same way and passed as `nativeLibrar
 - **Page cap (`maxPages`):** Default `10,000` (max `1,000,000`). More pages than that returns `{ status: 'tooManyPages', pages }`.
 - **Input size (`maxInputBytes`):** Default `10 MiB` (max `4,294,967,295`). Checked first: a larger input returns `{ status: 'limitExceeded', limit: 'inputBytes' }` before anything is parsed.
 - **Work budget (`maxWork`):** Default `~1.07 billion` units (roughly a second). A unit is roughly a nanosecond of work, counted deterministically so the same file costs the same units on every machine. Rounded up to a multiple of one million. Running out returns `{ status: 'limitExceeded', limit: 'work' }`.
-- **Structural limits:** Object count (`1,000,000`), xref chain length (`256`), and decompressed bytes (`64 MiB`) have fixed bounds inside the library and return `limitExceeded` if reached.
+- **Structural limits:** Object count (`1,000,000`), xref chain length (`256`), decompressed bytes (`64 MiB`), and parsed values alive at once (`1,000,000`, which keeps peak memory to about 150 MB in the worst files we built) have fixed bounds inside the library and return `limitExceeded` if reached.
 - **Passwords:** Only an empty user password is tried (RC4, AES-128, AES-256 R5/R6). Files requiring a user password return `unparseable`.
 - **WebAssembly memory (`recycleAboveBytes`):** WebAssembly linear memory only grows; when it passes `recycleAboveBytes` (default `32 MiB`), the instance is transparently replaced with a fresh one.
 

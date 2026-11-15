@@ -7,6 +7,7 @@ fn main() {
     let limits = Limits {
         max_work: u64::MAX,
         max_input_bytes: usize::MAX,
+        max_values: usize::MAX,
         ..Limits::default()
     };
     for dir in std::env::args().skip(1) {

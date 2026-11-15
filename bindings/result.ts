@@ -19,7 +19,7 @@ export type ProbeResult =
   | { status: 'panic'; reason: string }
 
 /** Which limit was hit. */
-export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed'
+export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' | 'values'
 
 export const ABI_VERSION = 3
 export const HEADER = 16

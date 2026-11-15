@@ -40,6 +40,16 @@ pub struct Limits {
     pub max_xref_sections: usize,
     /// Total bytes inflated from all streams read ([`Limit::Decompressed`]).
     pub max_decompressed: usize,
+    /// Items of parsed arrays and dictionaries alive at once ([`Limit::Values`]). Bounds memory: a small
+    /// compressed stream can inflate to millions of tiny values. An item costs about 100 bytes at worst (a
+    /// dictionary entry with its own key allocation and growth slack), so at the default the parsed structure
+    /// stays near 100 MB. Not counted here: the bytes of names and strings, copied from the file, and the
+    /// decompressed streams themselves, both bounded by the input size and
+    /// [`max_decompressed`](Self::max_decompressed). The worst file we built peaks at about 150 MB. Items
+    /// count only while the object holding them is alive, and the shared-object cache may hold at most half
+    /// of them, so a long document does not add up against this; real files keep at most a few tens of
+    /// thousands alive.
+    pub max_values: usize,
 }
 
 impl Default for Limits {
@@ -51,6 +61,7 @@ impl Default for Limits {
             max_objects: 1_000_000,
             max_xref_sections: 256,
             max_decompressed: 64 << 20,
+            max_values: 1_000_000,
         }
     }
 }
@@ -58,8 +69,9 @@ impl Default for Limits {
 /// The default work budget. See [`Limits::max_work`].
 pub const DEFAULT_MAX_WORK: u64 = 1 << 30;
 
-/// Which limit was hit.
+/// Which limit was hit. More may be added, so a `match` needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Limit {
     /// The input is larger than [`Limits::max_input_bytes`].
     InputBytes,
@@ -71,6 +83,8 @@ pub enum Limit {
     XrefSections,
     /// More than [`Limits::max_decompressed`] bytes inflated.
     Decompressed,
+    /// More than [`Limits::max_values`] items of arrays and dictionaries alive at once.
+    Values,
 }
 
 impl Limit {
@@ -82,6 +96,7 @@ impl Limit {
             Limit::Objects => "objects",
             Limit::XrefSections => "xrefSections",
             Limit::Decompressed => "decompressed",
+            Limit::Values => "values",
         }
     }
 }
@@ -169,8 +184,9 @@ impl Doc<'_> {
                 let Some(offset) = offset else {
                     return Err(Failure::Unparseable("object offset past the end"));
                 };
-                let mut lx = Lexer::new(self.data, offset);
+                let mut lx = Lexer::new(self.data, offset, self.meter);
                 let parsed = lx.parse_indirect();
+                self.meter.check_values()?;
                 self.meter
                     .charge(cost::PARSE * (lx.pos() - offset) as u64)?;
                 match parsed {
@@ -215,8 +231,9 @@ impl Doc<'_> {
         if start >= stm.data.len() {
             return Err(Failure::Unparseable("compressed object past the end"));
         }
-        let mut lx = Lexer::new(&stm.data, start);
+        let mut lx = Lexer::new(&stm.data, start, self.meter);
         let parsed = lx.parse_obj();
+        self.meter.check_values()?;
         self.meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
         parsed.ok_or(Failure::Unparseable("unreadable compressed object"))
     }
@@ -233,7 +250,9 @@ impl Doc<'_> {
         let Some(offset) = offset else {
             return Err(Failure::Unparseable("object stream offset past the end"));
         };
-        let Some(ind) = Lexer::new(self.data, offset).parse_indirect_full() else {
+        let parsed = Lexer::new(self.data, offset, self.meter).parse_indirect_full();
+        self.meter.check_values()?;
+        let Some(ind) = parsed else {
             return Err(Failure::Unparseable("unreadable object stream"));
         };
         let (Obj::Dict(dict), Some(range)) = (ind.obj, ind.stream) else {
@@ -263,7 +282,7 @@ impl Doc<'_> {
         };
         let bytes = stream::decode(&dict, &raw, remaining, self.meter)?;
         self.decoded += bytes.len();
-        let mut lx = Lexer::new(&bytes, 0);
+        let mut lx = Lexer::new(&bytes, 0, self.meter);
         let mut index = Vec::new();
         for _ in 0..n {
             let (Some(num), Some(rel)) = (lx.read_uint(), lx.read_uint()) else {
@@ -287,11 +306,16 @@ impl Doc<'_> {
     /// Page tree nodes are read once and go through `fetch`, so they do not use up the budget.
     fn fetch_shared(&mut self, num: u32) -> Result<Obj, Failure> {
         if let Some(obj) = self.shared.get(&num) {
-            return Ok(obj.clone());
+            // A dictionary is copied, and the copy counts towards the limit on items alive.
+            let obj = obj.clone();
+            self.meter.check_values()?;
+            return Ok(obj);
         }
         let obj = self.fetch(num)?;
         let weight = weight(&obj);
-        if self.shared_weight + weight <= SHARED_BUDGET {
+        // What the cache keeps stays alive for the whole call, so it may fill at most half the limit.
+        let budget = SHARED_BUDGET.min(self.limits.max_values / 2);
+        if self.shared_weight + weight <= budget {
             self.shared_weight += weight;
             self.shared.insert(num, obj.clone());
         }
@@ -394,7 +418,7 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     if data.len() > limits.max_input_bytes {
         return Err(Failure::LimitExceeded(Limit::InputBytes));
     }
-    let meter = Meter::new(limits.max_work);
+    let meter = Meter::new(limits.max_work).with_max_values(limits.max_values);
     // Offsets are relative to the `%PDF-` header, which may follow some leading junk.
     let head = &data[..data.len().min(1024)];
     let base = head.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
@@ -407,14 +431,18 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
             Err(Fault { failure, recover })
         }
     };
-    match first {
+    let result = match first {
         Ok(probe) => Ok(probe),
-        Err(Fault { recover: true, .. }) => {
-            let xref = recover(data, limits, &meter)?;
-            run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
-        }
+        Err(Fault { recover: true, .. }) => recover(data, limits, &meter)
+            .and_then(|xref| run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)),
         Err(fault) => Err(fault.failure),
+    };
+    // Parse sites report the value limit as a limit, which ends the call. This is a backstop for a site that
+    // tolerated a failed parse before checking.
+    if meter.values_exceeded() {
+        return Err(Failure::LimitExceeded(Limit::Values));
     }
+    result
 }
 
 fn run(
@@ -574,6 +602,66 @@ mod tests {
             ],
             1,
         )
+    }
+
+    #[test]
+    fn parsed_values_are_limited() {
+        let pdf = big_inherited_box(1, 10_000);
+        assert_eq!(probe(&pdf, &Limits::default()).unwrap().pages, 1);
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &limits),
+            Err(Failure::LimitExceeded(Limit::Values))
+        );
+    }
+
+    #[test]
+    fn values_of_objects_already_dropped_do_not_count() {
+        // 300 pages of about 110 values each: 33,000 parsed in total, but only one page alive at a time.
+        let annots = format!("[{}]", "0 ".repeat(100));
+        let pages: Vec<(u32, String)> = (0..300)
+            .map(|i| {
+                let page = format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots} >>"
+                );
+                (3 + i, page)
+            })
+            .collect();
+        let kids: String = (0..300).map(|i| format!("{} 0 R ", 3 + i)).collect();
+        let mut objects = vec![
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string()),
+            (2, format!("<< /Type /Pages /Kids [{kids}] /Count 300 >>")),
+        ];
+        objects.extend(pages);
+        let objects: Vec<(u32, &str)> = objects.iter().map(|(n, b)| (*n, b.as_str())).collect();
+        let pdf = build(&objects, 1);
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        assert_eq!(probe(&pdf, &limits).unwrap().pages, 300);
+        // A damaged copy is read twice, by the first pass and by the rescan; neither counts against the other.
+        let repaired = probe(&with_startxref(pdf, "1"), &limits).unwrap();
+        assert_eq!((repaired.pages, repaired.repaired), (300, true));
+    }
+
+    #[test]
+    fn the_value_limit_is_reported_when_the_rescan_hits_it() {
+        // A wrong startxref sends the call to the rescan, which skips objects it cannot parse.
+        let pdf = with_startxref(big_inherited_box(1, 10_000), "1");
+        let p = probe(&pdf, &Limits::default()).unwrap();
+        assert!(p.repaired);
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &limits),
+            Err(Failure::LimitExceeded(Limit::Values))
+        );
     }
 
     #[test]
@@ -776,6 +864,132 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_cache_fills_at_most_half_the_value_limit() {
+        // Each page's /MediaBox is its own indirect array, so every one is cached: 1,200 items would stay
+        // alive, more than the limit of 1,000, if the cache could take all of them.
+        let kids: String = (0..300).map(|i| format!("{} 0 R ", 3 + i)).collect();
+        let mut objects = vec![
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string()),
+            (2, format!("<< /Type /Pages /Kids [{kids}] /Count 300 >>")),
+        ];
+        for i in 0..300 {
+            objects.push((
+                3 + i,
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox {} 0 R >>", 303 + i),
+            ));
+            objects.push((303 + i, format!("[0 0 612 {}]", 700 + i)));
+        }
+        let objects: Vec<(u32, &str)> = objects.iter().map(|(n, b)| (*n, b.as_str())).collect();
+        let limits = Limits {
+            max_values: 1_000,
+            ..Limits::default()
+        };
+        let p = probe(&build(&objects, 1), &limits).unwrap();
+        assert_eq!(p.pages, 300);
+        assert_eq!(p.sizes[299].height, 999.0);
+    }
+
+    #[test]
+    fn values_of_incremental_trailers_dropped_do_not_count() {
+        // Ten updates, each with a trailer holding 1,000 extra values: 10,000 parsed, a few thousand alive.
+        let mut pdf = one_page("/MediaBox [0 0 612 792]");
+        let junk = format!("[{}]", "0 ".repeat(1_000));
+        for update in 0..10 {
+            let prev = {
+                let at = pdf.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+                let end = pdf[at..].iter().position(|b| *b == b'\n').unwrap();
+                String::from_utf8(pdf[at..at + end].to_vec()).unwrap()
+            };
+            let page = pdf.len();
+            pdf.extend(
+                format!(
+                    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 {}] >>\nendobj\n",
+                    700 + update
+                )
+                .bytes(),
+            );
+            let xref = pdf.len();
+            pdf.extend(
+                format!(
+                    "xref\n3 1\n{page:010} 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R /Prev {prev} /Junk {junk} >>\nstartxref\n{xref}\n%%EOF\n"
+                )
+                .bytes(),
+            );
+        }
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        let p = probe(&pdf, &limits).unwrap();
+        assert_eq!(p.sizes[0].height, 709.0);
+        assert!(!p.repaired);
+    }
+
+    #[test]
+    fn values_of_object_stream_headers_dropped_do_not_count() {
+        // The catalog and the page tree root sit in two object streams whose headers hold 1,000 extra values
+        // each, both read before the page tree: 2,000 parsed, about 1,000 alive at once.
+        let junk = format!("[{}]", "0 ".repeat(1_000));
+        let mut out = b"%PDF-1.5\n".to_vec();
+        let page = out.len();
+        out.extend(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>\nendobj\n");
+        let mut streams = Vec::new();
+        for (num, body) in [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        ] {
+            let header = format!("{num} 0 ");
+            let z = stored_zlib(format!("{header}{body}").as_bytes());
+            streams.push(out.len());
+            out.extend(
+                format!(
+                    "{} 0 obj\n<< /Type /ObjStm /N 1 /First {} /Filter /FlateDecode /Length {} /Junk {junk} >>\nstream\n",
+                    3 + num,
+                    header.len(),
+                    z.len()
+                )
+                .bytes(),
+            );
+            out.extend(z);
+            out.extend(b"\nendstream\nendobj\n");
+        }
+        let xs = out.len();
+        let row = |t: u8, a: usize, b: u8| [t, (a >> 8) as u8, a as u8, b];
+        let rows: Vec<u8> = [
+            row(2, 4, 0),
+            row(2, 5, 0),
+            row(1, page, 0),
+            row(1, streams[0], 0),
+            row(1, streams[1], 0),
+            row(1, xs, 0),
+        ]
+        .concat();
+        let z = stored_zlib(&rows);
+        out.extend(
+            format!(
+                "6 0 obj\n<< /Type /XRef /Size 7 /W [1 2 1] /Index [1 6] /Root 1 0 R /Filter /FlateDecode /Length {} >>\nstream\n",
+                z.len()
+            )
+            .bytes(),
+        );
+        out.extend(z);
+        out.extend(format!("\nendstream\nendobj\nstartxref\n{xs}\n%%EOF\n").bytes());
+        let limits = Limits {
+            max_values: 1_500,
+            ..Limits::default()
+        };
+        assert_eq!(probe(&out, &limits).unwrap().pages, 1);
+        let tight = Limits {
+            max_values: 900,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&out, &tight),
+            Err(Failure::LimitExceeded(Limit::Values))
+        );
+    }
+
+    #[test]
     fn reads_a_cross_reference_stream_and_an_object_stream() {
         let p = probe(&modern_pdf(), &Limits::default()).unwrap();
         assert_eq!(
@@ -922,8 +1136,9 @@ mod tests {
 
     #[test]
     fn an_object_too_big_to_keep_still_runs_out_of_budget() {
-        // More nodes than the shared budget, so it is parsed again for every page and the work budget stops it.
-        let pdf = big_inherited_box(100, SHARED_BUDGET + 100_000);
+        // More than the cache may keep (half the value limit), so it is parsed again for every page and the work
+        // budget stops it.
+        let pdf = big_inherited_box(100, 900_000);
         let budget = Limits {
             max_work: 100_000_000,
             ..Limits::default()

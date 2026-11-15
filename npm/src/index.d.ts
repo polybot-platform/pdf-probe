@@ -21,7 +21,7 @@ export type ProbeResult =
   | { status: 'panic'; reason: string }
 
 /** Which limit was hit. */
-export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed'
+export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' | 'values'
 
 /** `auto` uses the native library under Bun when one is found for this platform, and WebAssembly otherwise. */
 export type Engine = 'auto' | 'native' | 'wasm'

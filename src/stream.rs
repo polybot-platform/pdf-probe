@@ -20,54 +20,57 @@ fn from_inflate(why: &'static str) -> Failure {
 }
 
 /// Decodes `raw` through the stream dictionary's `/Filter` chain, writing at most `max_out` bytes per stage.
-/// Charges the meter for the work.
-pub(crate) fn decode(dict: &Dict, raw: &[u8], max_out: usize, meter: &Meter) -> Res<Vec<u8>> {
-    let filters: Vec<&[u8]> = match dict.get(b"Filter") {
-        None | Some(Obj::Null) => Vec::new(),
-        Some(Obj::Name(n)) => vec![n.as_slice()],
-        Some(Obj::Array(items)) => items
-            .iter()
-            .map(|o| match o {
-                Obj::Name(n) => Ok(n.as_slice()),
-                _ => bad("unsupported /Filter entry"),
-            })
-            .collect::<Res<_>>()?,
+/// Charges the meter for the work. With no filter to apply, `raw` is returned as given, owned or borrowed.
+pub(crate) fn decode<'a>(
+    dict: &Dict,
+    raw: Cow<'a, [u8]>,
+    max_out: usize,
+    meter: &Meter,
+) -> Res<Cow<'a, [u8]>> {
+    let filters: &[Obj] = match dict.get(b"Filter") {
+        None | Some(Obj::Null) => &[],
+        Some(o @ Obj::Name(_)) => std::slice::from_ref(o),
+        Some(Obj::Array(items)) => items,
         Some(_) => return bad("unsupported /Filter"),
     };
-    let parms: Vec<Option<&Dict>> = match dict.get(b"DecodeParms") {
-        None | Some(Obj::Null) => Vec::new(),
-        Some(Obj::Dict(d)) => vec![Some(d)],
-        Some(Obj::Array(items)) => items
-            .iter()
-            .map(|o| match o {
-                Obj::Dict(d) => Ok(Some(d)),
-                Obj::Null => Ok(None),
-                _ => bad("indirect /DecodeParms are not supported yet"),
-            })
-            .collect::<Res<_>>()?,
+    if filters.iter().any(|o| !matches!(o, Obj::Name(_))) {
+        return bad("unsupported /Filter entry");
+    }
+    let parms: &[Obj] = match dict.get(b"DecodeParms") {
+        None | Some(Obj::Null) => &[],
+        Some(o @ Obj::Dict(_)) => std::slice::from_ref(o),
+        Some(Obj::Array(items)) => items,
         Some(_) => return bad("indirect /DecodeParms are not supported yet"),
     };
-    let mut data: Cow<[u8]> = Cow::Borrowed(raw);
-    for (i, name) in filters.iter().enumerate() {
-        if *name == b"Crypt" {
+    if parms.iter().any(|o| !matches!(o, Obj::Dict(_) | Obj::Null)) {
+        return bad("indirect /DecodeParms are not supported yet");
+    }
+    let mut data = raw;
+    for (i, filter) in filters.iter().enumerate() {
+        let Obj::Name(name) = filter else {
+            unreachable!()
+        };
+        if &name[..] == b"Crypt" {
             continue; // handled by the security handler before decoding
         }
-        if *name != b"FlateDecode" && *name != b"Fl" {
+        if &name[..] != b"FlateDecode" && &name[..] != b"Fl" {
             return bad("unsupported filter");
         }
         meter.charge(cost::INFLATE_IN * data.len() as u64)?;
         let inflated = inflate::zlib(&data, max_out).map_err(from_inflate)?;
         meter.charge(cost::INFLATE_OUT * inflated.len() as u64)?;
-        data = Cow::Owned(match parms.get(i).copied().flatten() {
-            Some(p) => predict(p, inflated, meter)?,
-            None => inflated,
+        data = Cow::Owned(match parms.get(i) {
+            Some(Obj::Dict(p)) => predict(p, inflated, meter)?,
+            _ => inflated,
         });
     }
-    Ok(data.into_owned())
+    // Each inflate stage is already capped at `max_out` and predictors only shrink their input. Unfiltered
+    // data is the file's own bytes, so it is not counted against the decompression limit.
+    Ok(data)
 }
 
 /// Undoes a PNG predictor (`/Predictor` 10 to 15). Predictor 2 (TIFF) is not supported yet.
-fn predict(parms: &Dict, data: Vec<u8>, meter: &Meter) -> Res<Vec<u8>> {
+fn predict(parms: &Dict, mut data: Vec<u8>, meter: &Meter) -> Res<Vec<u8>> {
     let int = |key: &[u8], default: i64| match parms.get(key) {
         None => Ok(default),
         Some(o) => o
@@ -108,17 +111,22 @@ fn predict(parms: &Dict, data: Vec<u8>, meter: &Meter) -> Res<Vec<u8>> {
     if data.len() < stride {
         return Ok(Vec::new());
     }
-    let mut out = Vec::with_capacity(data.len() / stride * row);
-    let mut prev = vec![0u8; row];
-    let mut cur = vec![0u8; row];
-    for line in data.chunks_exact(stride) {
-        let (tag, bytes) = (line[0], &line[1..]);
+    // Removing each tag leaves the output behind the unread input, so rows can be decoded in place.
+    let rows = data.len() / stride;
+    for line in 0..rows {
+        let read = line * stride;
+        let write = line * row;
+        let tag = data[read];
         for i in 0..row {
-            let a = if i >= bpp { cur[i - bpp] } else { 0 };
-            let b = prev[i];
-            let c = if i >= bpp { prev[i - bpp] } else { 0 };
-            let x = bytes[i];
-            cur[i] = match tag {
+            let a = if i >= bpp { data[write + i - bpp] } else { 0 };
+            let b = if line > 0 { data[write + i - row] } else { 0 };
+            let c = if line > 0 && i >= bpp {
+                data[write + i - row - bpp]
+            } else {
+                0
+            };
+            let x = data[read + 1 + i];
+            data[write + i] = match tag {
                 0 => x,
                 1 => x.wrapping_add(a),
                 2 => x.wrapping_add(b),
@@ -127,10 +135,9 @@ fn predict(parms: &Dict, data: Vec<u8>, meter: &Meter) -> Res<Vec<u8>> {
                 _ => return bad("bad PNG predictor tag"),
             };
         }
-        out.extend_from_slice(&cur);
-        std::mem::swap(&mut prev, &mut cur);
     }
-    Ok(out)
+    data.truncate(rows * row);
+    Ok(data)
 }
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
@@ -143,5 +150,119 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
         b
     } else {
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn dict(source: &str) -> Dict {
+        let Some(Obj::Dict(d)) =
+            Lexer::new(source.as_bytes(), 0, &Meter::new(u64::MAX)).parse_obj()
+        else {
+            panic!("dictionary");
+        };
+        d
+    }
+
+    #[test]
+    fn png_predictors_decode_multiple_rows_and_bytes_per_pixel() {
+        let expected = [10, 20, 250, 240, 15, 30, 5, 20, 20, 40, 60, 80];
+        // Encoded independently, including wrapping differences and ties in Paeth's prediction.
+        let cases = [
+            (
+                1,
+                [0, 10, 20, 250, 240, 0, 15, 30, 5, 20, 0, 20, 40, 60, 80],
+            ),
+            (
+                1,
+                [1, 10, 10, 230, 246, 1, 15, 15, 231, 15, 1, 20, 20, 20, 20],
+            ),
+            (1, [2, 10, 20, 250, 240, 2, 5, 10, 11, 36, 2, 5, 10, 55, 60]),
+            (
+                1,
+                [3, 10, 15, 240, 115, 3, 10, 13, 121, 154, 3, 13, 15, 38, 40],
+            ),
+            (1, [4, 10, 10, 230, 246, 4, 5, 10, 11, 15, 4, 5, 10, 55, 20]),
+            (
+                2,
+                [0, 10, 20, 250, 240, 0, 15, 30, 5, 20, 0, 20, 40, 60, 80],
+            ),
+            (
+                2,
+                [1, 10, 20, 240, 220, 1, 15, 30, 246, 246, 1, 20, 40, 40, 40],
+            ),
+            (2, [2, 10, 20, 250, 240, 2, 5, 10, 11, 36, 2, 5, 10, 55, 60]),
+            (
+                2,
+                [3, 10, 20, 245, 230, 3, 10, 20, 129, 141, 3, 13, 25, 48, 50],
+            ),
+            (2, [4, 10, 20, 240, 220, 4, 5, 10, 11, 36, 4, 5, 10, 55, 50]),
+        ];
+        for (colors, encoded) in cases {
+            let parms = dict(&format!(
+                "<< /Predictor 15 /Colors {colors} /Columns {} >>",
+                4 / colors
+            ));
+            assert_eq!(
+                predict(&parms, encoded.to_vec(), &Meter::new(u64::MAX)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn predictors_keep_short_rows_and_invalid_tags_compatible() {
+        let parms = dict("<< /Predictor 12 /Columns 4 >>");
+        let meter = Meter::new(u64::MAX);
+        assert!(predict(&parms, vec![0, 1], &meter).unwrap().is_empty());
+        assert_eq!(
+            predict(&parms, vec![0, 1, 2, 3, 4, 255, 0], &meter).unwrap(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            predict(&parms, vec![5, 1, 2, 3, 4], &meter),
+            Err(Failure::Unparseable("bad PNG predictor tag"))
+        );
+    }
+
+    #[test]
+    fn unfiltered_streams_are_borrowed_and_not_capped() {
+        let meter = Meter::new(u64::MAX);
+        for source in ["<< >>", "<< /Filter /Crypt >>", "<< /Filter [] >>"] {
+            let d = dict(source);
+            for max_out in [3, 2, 0] {
+                assert!(matches!(
+                    decode(&d, Cow::Borrowed(b"abc"), max_out, &meter).unwrap(),
+                    Cow::Borrowed(b"abc")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn unfiltered_owned_input_is_passed_through_without_a_copy() {
+        let data = b"decrypted".to_vec();
+        let at = data.as_ptr();
+        let out = decode(&dict("<< >>"), Cow::Owned(data), 0, &Meter::new(u64::MAX)).unwrap();
+        assert!(matches!(&out, Cow::Owned(v) if v.as_ptr() == at));
+    }
+
+    #[test]
+    fn filter_parameters_are_validated_before_decoding() {
+        let d = dict("<< /Filter [/FlateDecode] /DecodeParms [null 1] >>");
+        assert_eq!(
+            decode(&d, Cow::Borrowed(b"bad zlib"), 10, &Meter::new(u64::MAX)),
+            Err(Failure::Unparseable(
+                "indirect /DecodeParms are not supported yet"
+            ))
+        );
+        let d = dict("<< /Filter [/FlateDecode 1] >>");
+        assert_eq!(
+            decode(&d, Cow::Borrowed(b"bad zlib"), 10, &Meter::new(u64::MAX)),
+            Err(Failure::Unparseable("unsupported /Filter entry"))
+        );
     }
 }

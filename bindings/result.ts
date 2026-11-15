@@ -23,6 +23,8 @@ export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'de
 
 export const ABI_VERSION = 3
 export const HEADER = 16
+/** Rust's `Limits::default().max_input_bytes`. A test in ffi/src/lib.rs checks the two match. */
+export const DEFAULT_MAX_INPUT_BYTES = 10 * 1024 * 1024
 const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic', 'limitExceeded'] as const
 const DECODER = new TextDecoder()
 
@@ -42,9 +44,9 @@ export function decodeResult(buf: Uint8Array, length: number): ProbeResult {
   const reason = () => DECODER.decode(buf.subarray(HEADER + 16 * count, HEADER + 16 * count + metaOrReason))
   switch (status) {
     case 'ok': {
-      const sizes: PageSize[] = []
+      const sizes = new Array<PageSize>(count)
       for (let i = 0; i < count; i++) {
-        sizes.push([view.getFloat64(HEADER + 16 * i, true), view.getFloat64(HEADER + 16 * i + 8, true)])
+        sizes[i] = [view.getFloat64(HEADER + 16 * i, true), view.getFloat64(HEADER + 16 * i + 8, true)]
       }
       const major = (metaOrReason >>> 8) & 0xff
       const minor = (metaOrReason >>> 16) & 0xff

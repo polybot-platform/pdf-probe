@@ -62,7 +62,7 @@ export interface Probe {
    * a bad call.
    */
   check(pdf: Uint8Array | ArrayBuffer, options?: CheckOptions): ProbeResult
-  /** Releases the native library. A probe cannot be used afterwards. */
+  /** Releases the engine and its retained buffers. A probe cannot be used afterwards. */
   close(): void
 }
 

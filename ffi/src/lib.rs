@@ -53,11 +53,16 @@ pub const HEADER: usize = 16;
 /// More pages than this is never requested: it bounds the output buffer a host has to allocate.
 const MAX_PAGES_CEILING: u32 = 1_000_000;
 
-fn header(status: u32, pages: usize, sizes: usize, meta_or_reason: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(HEADER);
-    out.extend_from_slice(&status.to_le_bytes());
-    for v in [pages, sizes, meta_or_reason] {
-        out.extend_from_slice(&u32::try_from(v).unwrap_or(u32::MAX).to_le_bytes());
+fn header(status: u32, pages: usize, sizes: usize, meta_or_reason: usize) -> [u8; HEADER] {
+    let mut out = [0; HEADER];
+    out[..4].copy_from_slice(&status.to_le_bytes());
+    for (slot, v) in out[4..]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip([pages, sizes, meta_or_reason])
+    {
+        slot.copy_from_slice(&u32::try_from(v).unwrap_or(u32::MAX).to_le_bytes());
     }
     out
 }
@@ -80,7 +85,8 @@ fn pack_meta(p: &Probe) -> usize {
 }
 
 fn with_reason(status: u32, pages: usize, reason: &str) -> Vec<u8> {
-    let mut out = header(status, pages, 0, reason.len());
+    let mut out = Vec::with_capacity(HEADER + reason.len());
+    out.extend_from_slice(&header(status, pages, 0, reason.len()));
     out.extend_from_slice(reason.as_bytes());
     out
 }
@@ -89,7 +95,8 @@ fn with_reason(status: u32, pages: usize, reason: &str) -> Vec<u8> {
 pub fn encode(outcome: std::thread::Result<Result<Probe, Failure>>) -> Vec<u8> {
     match outcome {
         Ok(Ok(p)) => {
-            let mut out = header(STATUS_OK, p.pages, p.sizes.len(), pack_meta(&p));
+            let mut out = Vec::with_capacity(HEADER + 16 * p.sizes.len());
+            out.extend_from_slice(&header(STATUS_OK, p.pages, p.sizes.len(), pack_meta(&p)));
             for s in &p.sizes {
                 out.extend_from_slice(&s.width.to_le_bytes());
                 out.extend_from_slice(&s.height.to_le_bytes());
@@ -217,6 +224,22 @@ mod tests {
 
     fn f64_at(b: &[u8], at: usize) -> f64 {
         f64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn the_typescript_input_default_matches_the_library() {
+        // The wasm binding rejects oversized inputs before copying them into linear memory, using its own copy
+        // of the default. Keep the two in step.
+        let ts = include_str!("../../bindings/result.ts");
+        let expected = format!(
+            "export const DEFAULT_MAX_INPUT_BYTES = {} * 1024 * 1024\n",
+            Limits::default().max_input_bytes >> 20
+        );
+        assert_eq!(Limits::default().max_input_bytes % (1 << 20), 0);
+        assert!(
+            ts.contains(&expected),
+            "bindings/result.ts should contain {expected:?}"
+        );
     }
 
     #[test]

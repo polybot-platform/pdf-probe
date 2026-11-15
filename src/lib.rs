@@ -19,6 +19,7 @@ mod xref;
 use encrypt::Crypto;
 use lexer::{Lexer, Obj};
 use meter::{Meter, cost};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use xref::{Entry, Xref};
 
@@ -45,7 +46,7 @@ pub struct Limits {
     /// dictionary entry with its own key allocation and growth slack), so at the default the parsed structure
     /// stays near 100 MB. Not counted here: the bytes of names and strings, copied from the file, and the
     /// decompressed streams themselves, both bounded by the input size and
-    /// [`max_decompressed`](Self::max_decompressed). The worst file we built peaks at about 150 MB. Items
+    /// [`max_decompressed`](Self::max_decompressed). The worst file we built peaks at about 170 MB. Items
     /// count only while the object holding them is alive, and the shared-object cache may hold at most half
     /// of them, so a long document does not add up against this; real files keep at most a few tens of
     /// thousands alive.
@@ -140,8 +141,9 @@ pub enum Failure {
 }
 
 /// A decoded object stream: where each object starts, relative to `first`.
-struct ObjStm {
-    data: Vec<u8>,
+struct ObjStm<'a> {
+    /// Borrowed from the file when the stream is neither encrypted nor compressed.
+    data: Cow<'a, [u8]>,
     first: usize,
     index: Vec<(u32, usize)>,
 }
@@ -153,14 +155,14 @@ pub(crate) struct Doc<'a> {
     meter: &'a Meter,
     fetched: usize,
     decoded: usize,
-    objstms: HashMap<u32, ObjStm>,
+    objstms: HashMap<u32, ObjStm<'a>>,
     crypto: Option<Crypto>,
     /// Objects reached through a reference from another object (a shared `/MediaBox`, say), parsed once.
     shared: HashMap<u32, Obj>,
     shared_weight: usize,
 }
 
-impl Doc<'_> {
+impl<'a> Doc<'a> {
     fn spend(&mut self) -> Result<(), Failure> {
         self.fetched += 1;
         if self.fetched > self.limits.max_objects {
@@ -238,7 +240,7 @@ impl Doc<'_> {
         parsed.ok_or(Failure::Unparseable("unreadable compressed object"))
     }
 
-    fn load_objstm(&mut self, stream: u32) -> Result<ObjStm, Failure> {
+    fn load_objstm(&mut self, stream: u32) -> Result<ObjStm<'a>, Failure> {
         let Some(Entry::Offset(offset)) = self.xref.entries.get(&stream).copied() else {
             return Err(Failure::Unparseable(
                 "object stream is missing or itself compressed",
@@ -275,12 +277,12 @@ impl Doc<'_> {
             return Err(Failure::LimitExceeded(Limit::Objects));
         }
         let remaining = self.limits.max_decompressed.saturating_sub(self.decoded);
-        let raw = &self.data[range];
+        let raw: &'a [u8] = &self.data[range];
         let raw = match &self.crypto {
             Some(crypto) => crypto.decrypt_stream(stream, ind.gen_, &dict, raw, self.meter)?,
-            None => std::borrow::Cow::Borrowed(raw),
+            None => Cow::Borrowed(raw),
         };
-        let bytes = stream::decode(&dict, &raw, remaining, self.meter)?;
+        let bytes = stream::decode(&dict, raw, remaining, self.meter)?;
         self.decoded += bytes.len();
         let mut lx = Lexer::new(&bytes, 0, self.meter);
         let mut index = Vec::new();
@@ -306,7 +308,8 @@ impl Doc<'_> {
     /// Page tree nodes are read once and go through `fetch`, so they do not use up the budget.
     fn fetch_shared(&mut self, num: u32) -> Result<Obj, Failure> {
         if let Some(obj) = self.shared.get(&num) {
-            // A dictionary is copied, and the copy counts towards the limit on items alive.
+            // Arrays and dictionaries are shared, so this copies pointers; any copy made counts towards the
+            // limit on items alive.
             let obj = obj.clone();
             self.meter.check_values()?;
             return Ok(obj);
@@ -335,8 +338,8 @@ impl Doc<'_> {
     }
 }
 
-/// How much parsed data [`Doc::fetch_shared`] keeps, counted in object nodes (about 32 bytes each, so
-/// roughly 32 MB at most).
+/// How much parsed data [`Doc::fetch_shared`] keeps, counted in object nodes plus name and string bytes.
+/// Cached values share their storage with callers.
 const SHARED_BUDGET: usize = 1 << 20;
 
 /// The size of a parsed object, in nodes plus the bytes of its names and strings.

@@ -40,6 +40,11 @@ pub struct Limits {
     pub max_xref_sections: usize,
     /// Total bytes inflated from all streams read ([`Limit::Decompressed`]).
     pub max_decompressed: usize,
+    /// Values (numbers, names, strings, arrays, dictionaries, ...) parsed in the whole call ([`Limit::Values`]).
+    /// Bounds memory: a small compressed stream can inflate to millions of tiny values. Each costs a few dozen
+    /// bytes, so the default allows on the order of 100 MB; real files parse far fewer (a 10,000-page file
+    /// about 500,000).
+    pub max_values: usize,
 }
 
 impl Default for Limits {
@@ -51,6 +56,7 @@ impl Default for Limits {
             max_objects: 1_000_000,
             max_xref_sections: 256,
             max_decompressed: 64 << 20,
+            max_values: 2_000_000,
         }
     }
 }
@@ -58,8 +64,9 @@ impl Default for Limits {
 /// The default work budget. See [`Limits::max_work`].
 pub const DEFAULT_MAX_WORK: u64 = 1 << 30;
 
-/// Which limit was hit.
+/// Which limit was hit. More may be added, so a `match` needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Limit {
     /// The input is larger than [`Limits::max_input_bytes`].
     InputBytes,
@@ -71,6 +78,8 @@ pub enum Limit {
     XrefSections,
     /// More than [`Limits::max_decompressed`] bytes inflated.
     Decompressed,
+    /// More than [`Limits::max_values`] values parsed.
+    Values,
 }
 
 impl Limit {
@@ -82,6 +91,7 @@ impl Limit {
             Limit::Objects => "objects",
             Limit::XrefSections => "xrefSections",
             Limit::Decompressed => "decompressed",
+            Limit::Values => "values",
         }
     }
 }
@@ -169,7 +179,7 @@ impl Doc<'_> {
                 let Some(offset) = offset else {
                     return Err(Failure::Unparseable("object offset past the end"));
                 };
-                let mut lx = Lexer::new(self.data, offset);
+                let mut lx = Lexer::new(self.data, offset, self.meter);
                 let parsed = lx.parse_indirect();
                 self.meter
                     .charge(cost::PARSE * (lx.pos() - offset) as u64)?;
@@ -215,7 +225,7 @@ impl Doc<'_> {
         if start >= stm.data.len() {
             return Err(Failure::Unparseable("compressed object past the end"));
         }
-        let mut lx = Lexer::new(&stm.data, start);
+        let mut lx = Lexer::new(&stm.data, start, self.meter);
         let parsed = lx.parse_obj();
         self.meter.charge(cost::PARSE * (lx.pos() - start) as u64)?;
         parsed.ok_or(Failure::Unparseable("unreadable compressed object"))
@@ -233,7 +243,7 @@ impl Doc<'_> {
         let Some(offset) = offset else {
             return Err(Failure::Unparseable("object stream offset past the end"));
         };
-        let Some(ind) = Lexer::new(self.data, offset).parse_indirect_full() else {
+        let Some(ind) = Lexer::new(self.data, offset, self.meter).parse_indirect_full() else {
             return Err(Failure::Unparseable("unreadable object stream"));
         };
         let (Obj::Dict(dict), Some(range)) = (ind.obj, ind.stream) else {
@@ -263,7 +273,7 @@ impl Doc<'_> {
         };
         let bytes = stream::decode(&dict, &raw, remaining, self.meter)?;
         self.decoded += bytes.len();
-        let mut lx = Lexer::new(&bytes, 0);
+        let mut lx = Lexer::new(&bytes, 0, self.meter);
         let mut index = Vec::new();
         for _ in 0..n {
             let (Some(num), Some(rel)) = (lx.read_uint(), lx.read_uint()) else {
@@ -394,7 +404,7 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
     if data.len() > limits.max_input_bytes {
         return Err(Failure::LimitExceeded(Limit::InputBytes));
     }
-    let meter = Meter::new(limits.max_work);
+    let meter = Meter::new(limits.max_work).with_max_values(limits.max_values);
     // Offsets are relative to the `%PDF-` header, which may follow some leading junk.
     let head = &data[..data.len().min(1024)];
     let base = head.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
@@ -407,14 +417,22 @@ pub fn probe(data: &[u8], limits: &Limits) -> Result<Probe, Failure> {
             Err(Fault { failure, recover })
         }
     };
-    match first {
+    let result = match first {
         Ok(probe) => Ok(probe),
-        Err(Fault { recover: true, .. }) => {
-            let xref = recover(data, limits, &meter)?;
-            run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
+        // Past the value limit every parse fails, so a rescan could not find anything.
+        Err(Fault { recover: true, .. }) if !meter.values_exceeded() => {
+            recover(data, limits, &meter).and_then(|xref| {
+                run(data, limits, &meter, xref, true).map_err(|fault| fault.failure)
+            })
         }
         Err(fault) => Err(fault.failure),
+    };
+    // The parser stops at the value limit by failing, and callers see that as a bad object, which some of them
+    // tolerate. Report the limit, whatever was made of it.
+    if meter.values_exceeded() {
+        return Err(Failure::LimitExceeded(Limit::Values));
     }
+    result
 }
 
 fn run(
@@ -574,6 +592,50 @@ mod tests {
             ],
             1,
         )
+    }
+
+    /// One page whose `/MediaBox` is an indirect array of `items` zeros.
+    fn huge_media_box(items: usize) -> Vec<u8> {
+        let array = format!("[{}]", "0 ".repeat(items));
+        build(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                (3, "<< /Type /Page /Parent 2 0 R /MediaBox 4 0 R >>"),
+                (4, &array),
+            ],
+            1,
+        )
+    }
+
+    #[test]
+    fn parsed_values_are_limited() {
+        let pdf = huge_media_box(10_000);
+        assert_eq!(probe(&pdf, &Limits::default()).unwrap().pages, 1);
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &limits),
+            Err(Failure::LimitExceeded(Limit::Values))
+        );
+    }
+
+    #[test]
+    fn the_value_limit_is_reported_when_the_rescan_hits_it() {
+        // A wrong startxref sends the call to the rescan, which skips objects it cannot parse.
+        let pdf = with_startxref(huge_media_box(10_000), "1");
+        let p = probe(&pdf, &Limits::default()).unwrap();
+        assert!(p.repaired);
+        let limits = Limits {
+            max_values: 5_000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            probe(&pdf, &limits),
+            Err(Failure::LimitExceeded(Limit::Values))
+        );
     }
 
     #[test]
@@ -926,11 +988,17 @@ mod tests {
         let pdf = big_inherited_box(100, SHARED_BUDGET + 100_000);
         let budget = Limits {
             max_work: 100_000_000,
+            max_values: usize::MAX,
             ..Limits::default()
         };
         assert_eq!(
             probe(&pdf, &budget),
             Err(Failure::LimitExceeded(Limit::Work))
+        );
+        // With default limits the parsed values of the repeated parses run out first.
+        assert_eq!(
+            probe(&pdf, &Limits::default()),
+            Err(Failure::LimitExceeded(Limit::Values))
         );
     }
 

@@ -145,7 +145,7 @@ for (const engine of engines) {
     assert.equal(probe.check(new Uint8Array(mib10 + 1), { maxInputBytes: mib10 + 1 }).status, 'unparseable')
   })
 
-  test(`${engine}: maxWork stops work that is large only in total`, async () => {
+  test(`${engine}: re-reading a huge shared object is stopped by the limits`, async () => {
     const probe = await createProbe({ engine })
     // One inherited array that every page uses is read once, however many pages there are.
     const shared = bigInheritedBox(100, 20_000)
@@ -153,9 +153,11 @@ for (const engine of engines) {
     const ok = probe.check(shared)
     assert.equal(ok.status, 'ok')
     assert.equal(ok.pages, 100)
-    // Too big to keep (over a million nodes), it is read again for every page, and the budget stops it.
+    // Too big to keep (over a million nodes), it would be read again for every page. The second read passes
+    // the limit on parsed values (2,000,000); a work budget smaller than one read stops it first.
     const hostile = bigInheritedBox(100, 1_100_000)
-    assert.deepEqual(probe.check(hostile, { maxWork: 100_000_000 }), { status: 'limitExceeded', limit: 'work' })
+    assert.deepEqual(probe.check(hostile, { maxWork: 100_000_000 }), { status: 'limitExceeded', limit: 'values' })
+    assert.deepEqual(probe.check(hostile, { maxWork: 3_000_000 }), { status: 'limitExceeded', limit: 'work' })
     // A tiny budget is rounded up to a million units, which is plenty for a tiny file.
     assert.equal(probe.check(pdf, { maxWork: 1 }).status, 'ok')
   })

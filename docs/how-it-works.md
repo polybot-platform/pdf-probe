@@ -25,6 +25,6 @@ flowchart TD
 
 ## Core rules
 
-- **Fail closed.** If a step cannot be completed with confidence, the result is `Failure::Unparseable`. If any resource limit (`max_input_bytes`, `max_work`, `max_objects`, `max_xref_sections`, `max_decompressed`) is reached, the result is `Failure::LimitExceeded` and no recovery rescan is attempted.
+- **Fail closed.** If a step cannot be completed with confidence, the result is `Failure::Unparseable`. If any resource limit (`max_input_bytes`, `max_work`, `max_objects`, `max_xref_sections`, `max_decompressed`, `max_values`) is reached, the result is `Failure::LimitExceeded` and no recovery rescan is attempted.
 - **`/Count` handling.** Like `pdf.js` and poppler, `pdf-probe` trusts a valid non-negative integer `/Count` on the root `/Pages` dictionary and only walks the full tree beyond `/Count` when `/Count` is missing or invalid. If the tree has fewer pages than `/Count` claims, the actual lower count is returned.
 - **Intended differences from `pdf.js`.** Listed in [`corpus/intended-differences.json`](../corpus/intended-differences.json): an empty page tree returns `Empty`, and Brotli-compressed streams or unparseable page objects fail closed rather than substituting a default page size.

@@ -34,7 +34,7 @@ switch (result.status) {
   case 'tooManyPages': // result.pages
   case 'empty': // well-formed PDF with 0 pages
   case 'unparseable': // result.reason (damaged, unsupported filter, or password required)
-  case 'limitExceeded': // result.limit ('inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed')
+  case 'limitExceeded': // result.limit ('inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' | 'values')
 }
 ```
 
@@ -77,15 +77,17 @@ Because the input is hostile, every loop and allocation is bounded. Hitting a re
 | Work budget | `2^30` units (~1.07B) | `max_work` / `maxWork` | `work` |
 | Page cap | 10,000 | `max_pages` / `maxPages` | returns `TooManyPages` / `tooManyPages` |
 | Objects, xref sections, inflated bytes | 1,000,000 / 256 / 64 MiB | Rust `Limits` struct | `objects`, `xrefSections`, `decompressed` |
+| Parsed values (bounds memory) | 2,000,000 | Rust `Limits` struct (`max_values`) | `values` |
 
 Nesting depth (arrays/dictionaries) and page-tree depth are fixed at 64.
 
 ### The deterministic work counter and shared-object cache
 
-A PDF can be small on disk yet expensive in total—for example, a `/Pages` node whose inherited `/MediaBox` points to a huge array would otherwise be re-parsed on every page. Two mechanisms bound this:
+A PDF can be small on disk yet expensive in total—for example, a `/Pages` node whose inherited `/MediaBox` points to a huge array would otherwise be re-parsed on every page. Three mechanisms bound this and similar inputs:
 
 1. **Shared-object cache:** Indirect objects reached through references (such as a shared `/MediaBox` or `/Resources`) are parsed once and cached up to ~1 million nodes (~32 MB max), with `Rc`-shared arrays.
 2. **Deterministic work budget (`Meter`):** Parsing, byte scanning, inflating, undoing predictors, hashing, ciphering, and walking page-tree nodes each charge a fixed per-byte or per-node weight (`src/meter.rs`). The count is machine-independent, so the same file always costs the exact same number of work units (`Probe.work`). Over the 1,021 answered PDFs in our test corpora, the median file uses ~18,000 units, p99 uses ~3.9M, and the largest uses 57M (~5% of the default budget).
+3. **Parsed-value limit (`max_values`):** Work bounds time, not memory: a 64 KB file can hold a compressed stream that inflates to one array of 30+ million numbers. Every value the parser builds is counted, and parsing stops as soon as the call passes 2,000,000 values (`values`). Real files parse far fewer: the largest in our corpora parses ~33,000, and a 10,000-page file about 500,000.
 
 ---
 

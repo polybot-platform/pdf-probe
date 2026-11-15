@@ -26,7 +26,7 @@ switch (result.status) {
     void result.pages
     break
   case 'limitExceeded': {
-    const limit: 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' = result.limit
+    const limit: 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'decompressed' | 'values' = result.limit
     void limit
     break
   }

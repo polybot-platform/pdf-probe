@@ -1,6 +1,8 @@
 //! A small PDF object lexer and parser. Bounded: nesting depth is limited, and nothing here recurses on
-//! untrusted structure except `parse_obj`, which stops at `MAX_NEST`.
+//! untrusted structure except `parse_obj`, which stops at `MAX_NEST`. Every value built is counted by the
+//! [`Meter`], and parsing stops once the call's limit on parsed values is passed.
 
+use crate::meter::Meter;
 use std::rc::Rc;
 
 /// Deepest allowed nesting of arrays and dictionaries.
@@ -71,11 +73,13 @@ pub(crate) struct Indirect {
 pub(crate) struct Lexer<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Counts every value built, so that parsing stops before a huge array or dictionary exhausts memory.
+    meter: &'a Meter,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(data: &'a [u8], pos: usize) -> Self {
-        Lexer { data, pos }
+    pub fn new(data: &'a [u8], pos: usize, meter: &'a Meter) -> Self {
+        Lexer { data, pos, meter }
     }
 
     pub fn pos(&self) -> usize {
@@ -135,7 +139,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn parse_nested(&mut self, depth: usize) -> Option<Obj> {
-        if depth > MAX_NEST {
+        if depth > MAX_NEST || !self.meter.take_value() {
             return None;
         }
         self.skip_ws();
@@ -426,5 +430,23 @@ fn hex_val(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parsing_stops_as_soon_as_the_value_limit_is_passed() {
+        // The array and its five items are six values.
+        let meter = Meter::new(u64::MAX).with_max_values(6);
+        assert!(Lexer::new(b"[0 0 0 0 0]", 0, &meter).parse_obj().is_some());
+        let meter = Meter::new(u64::MAX).with_max_values(5);
+        let mut lx = Lexer::new(b"[0 0 0 0 0] trailing", 0, &meter);
+        assert!(lx.parse_obj().is_none());
+        assert!(meter.values_exceeded());
+        // It stopped at the value that passed the limit, before the end of the array.
+        assert!(lx.pos() < 10);
     }
 }

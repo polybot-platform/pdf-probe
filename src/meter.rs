@@ -30,14 +30,39 @@ pub(crate) mod cost {
 pub(crate) struct Meter {
     used: Cell<u64>,
     max: u64,
+    /// Parsed values built so far, and the most allowed ([`Limit::Values`](crate::Limit::Values)). Work bounds
+    /// time; this bounds memory, since a small compressed stream can inflate to millions of tiny values.
+    values: Cell<usize>,
+    max_values: usize,
 }
 
 impl Meter {
+    /// A meter with a work budget and no limit on parsed values.
     pub fn new(max: u64) -> Meter {
         Meter {
             used: Cell::new(0),
             max,
+            values: Cell::new(0),
+            max_values: usize::MAX,
         }
+    }
+
+    /// Limits the number of parsed values to `max_values`.
+    pub fn with_max_values(self, max_values: usize) -> Meter {
+        Meter { max_values, ..self }
+    }
+
+    /// Counts one parsed value. `false` once the total passes the limit; the parser then stops at once.
+    pub fn take_value(&self) -> bool {
+        let values = self.values.get().saturating_add(1);
+        self.values.set(values);
+        values <= self.max_values
+    }
+
+    /// Whether the parsed-value limit was passed. Every parse fails from then on, whatever the caller made of
+    /// the failure, so [`probe`](crate::probe) reports the limit rather than that failure.
+    pub fn values_exceeded(&self) -> bool {
+        self.values.get() > self.max_values
     }
 
     /// Spends `units`. `Err` once the total passes the budget.
@@ -76,5 +101,16 @@ mod tests {
         let m = Meter::new(u64::MAX - 1);
         assert!(m.charge(u64::MAX).is_err());
         assert_eq!(m.used(), u64::MAX);
+    }
+
+    #[test]
+    fn counts_parsed_values_up_to_the_limit() {
+        let m = Meter::new(u64::MAX).with_max_values(2);
+        assert!(m.take_value() && m.take_value());
+        assert!(!m.values_exceeded());
+        assert!(!m.take_value());
+        assert!(m.values_exceeded());
+        assert!(!m.take_value());
+        assert!(Meter::new(u64::MAX).take_value());
     }
 }

@@ -292,6 +292,7 @@ mod tests {
             (pdf_probe::Limit::Objects, "objects"),
             (pdf_probe::Limit::XrefSections, "xrefSections"),
             (pdf_probe::Limit::Decompressed, "decompressed"),
+            (pdf_probe::Limit::Values, "values"),
         ] {
             assert_eq!(
                 &encode(Ok(Err(Failure::LimitExceeded(limit))))[HEADER..],

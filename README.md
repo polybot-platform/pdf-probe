@@ -77,7 +77,7 @@ Because the input is hostile, every loop and allocation is bounded. Hitting a re
 | Work budget | `2^30` units (~1.07B) | `max_work` / `maxWork` | `work` |
 | Page cap | 10,000 | `max_pages` / `maxPages` | returns `TooManyPages` / `tooManyPages` |
 | Objects, xref sections, inflated bytes | 1,000,000 / 256 / 64 MiB | Rust `Limits` struct | `objects`, `xrefSections`, `decompressed` |
-| Parsed values alive at once (bounds memory) | 1,000,000 (~100 MB peak) | Rust `Limits` struct (`max_values`) | `values` |
+| Parsed values alive at once (bounds memory) | 1,000,000 | Rust `Limits` struct (`max_values`) | `values` |
 
 Nesting depth (arrays/dictionaries) and page-tree depth are fixed at 64.
 
@@ -87,7 +87,7 @@ A PDF can be small on disk yet expensive in total—for example, a `/Pages` node
 
 1. **Shared-object cache:** Indirect objects reached through references (such as a shared `/MediaBox` or `/Resources`) are parsed once and cached up to ~1 million nodes (~32 MB max), with `Rc`-shared arrays.
 2. **Deterministic work budget (`Meter`):** Parsing, byte scanning, inflating, undoing predictors, hashing, ciphering, and walking page-tree nodes each charge a fixed per-byte or per-node weight (`src/meter.rs`). The count is machine-independent, so the same file always costs the exact same number of work units (`Probe.work`). Over the 1,021 answered PDFs in our test corpora, the median file uses ~18,000 units, p99 uses ~3.9M, and the largest uses 57M (~5% of the default budget).
-3. **Parsed-value limit (`max_values`):** Work bounds time, not memory: a 64 KB file can hold a compressed stream that inflates to one array of 30+ million numbers. Arrays and dictionaries count their items while they are alive (added when parsed, given back when dropped), and parsing stops as soon as more than 1,000,000 would be alive at once (`values`). An item costs about 100 bytes at worst (a dictionary entry with its own key and growth slack), so peak memory stays near 100 MB. A long document does not add up against the limit: each page's objects are dropped after it is read, and the shared-object cache may hold at most half the limit. The largest file in our corpora keeps about 33,000 items alive.
+3. **Parsed-value limit (`max_values`):** Work bounds time, not memory: a 64 KB file can hold a compressed stream that inflates to one array of 30+ million numbers. Arrays and dictionaries count their items while they are alive (added when parsed, given back when dropped), and parsing stops as soon as more than 1,000,000 would be alive at once (`values`). An item costs about 100 bytes at worst (a dictionary entry with its own key and growth slack), so the parsed structure stays near 100 MB. The bytes of names and strings and the decompressed streams themselves are not counted, but are bounded by the input size and `max_decompressed` (64 MiB); the worst file we built (a 1.2 MB file whose 47 MiB stream holds 450,000 strings) peaks at about 150 MB, against 1.1 GB for a 64 KB file before this limit. A long document does not add up against the limit: each page's objects are dropped after it is read, and the shared-object cache may hold at most half the limit. The largest file in our corpora keeps about 33,000 items alive.
 
 ---
 

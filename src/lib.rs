@@ -46,7 +46,7 @@ pub struct Limits {
     /// dictionary entry with its own key allocation and growth slack), so at the default the parsed structure
     /// stays near 100 MB. Not counted here: the bytes of names and strings, copied from the file, and the
     /// decompressed streams themselves, both bounded by the input size and
-    /// [`max_decompressed`](Self::max_decompressed). The worst file we built peaks at about 150 MB. Items
+    /// [`max_decompressed`](Self::max_decompressed). The worst file we built peaks at about 170 MB. Items
     /// count only while the object holding them is alive, and the shared-object cache may hold at most half
     /// of them, so a long document does not add up against this; real files keep at most a few tens of
     /// thousands alive.

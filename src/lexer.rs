@@ -16,8 +16,8 @@ pub(crate) enum Obj {
     Bool(bool),
     Int(i64),
     Real(f64),
-    Name(Rc<[u8]>),
-    Str(Rc<[u8]>),
+    Name(Rc<Vec<u8>>),
+    Str(Rc<Vec<u8>>),
     /// Parsed values are immutable and shared, so resolving inherited values only copies pointers.
     Array(Rc<Items<Obj>>),
     Dict(Dict),
@@ -26,6 +26,11 @@ pub(crate) enum Obj {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Dict(pub Rc<Items<(Vec<u8>, Obj)>>);
+
+// A small compressed stream can inflate to millions of parsed values, so the size of `Obj` bounds peak memory.
+// Thin `Rc<..>` keeps it at 16 bytes; `Rc<[..]>` is a fat pointer and makes it 24.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Obj>() == 16);
 
 thread_local! {
     /// Items of arrays and dictionaries alive on this thread. Parsed objects hold `Rc`s, so they never leave
@@ -159,18 +164,11 @@ pub(crate) struct Lexer<'a> {
     /// Checks the limit on items alive for every item added, so that parsing stops before a huge array or
     /// dictionary exhausts memory.
     meter: &'a Meter,
-    /// Names and strings are decoded here, then copied once into an allocation of the exact size.
-    scratch: Vec<u8>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(data: &'a [u8], pos: usize, meter: &'a Meter) -> Self {
-        Lexer {
-            data,
-            pos,
-            meter,
-            scratch: Vec::new(),
-        }
+        Lexer { data, pos, meter }
     }
 
     pub fn pos(&self) -> usize {
@@ -237,20 +235,15 @@ impl<'a> Lexer<'a> {
         match self.peek()? {
             b'/' => {
                 self.pos += 1;
-                self.read_name();
-                Some(Obj::Name(Rc::from(self.scratch.as_slice())))
+                Some(Obj::Name(Rc::new(self.read_name())))
             }
-            b'(' => {
-                self.read_literal_string()?;
-                Some(Obj::Str(Rc::from(self.scratch.as_slice())))
-            }
+            b'(' => self.read_literal_string().map(|s| Obj::Str(Rc::new(s))),
             b'<' => {
                 if self.data.get(self.pos + 1) == Some(&b'<') {
                     self.pos += 2;
                     self.read_dict_body(depth).map(Obj::Dict)
                 } else {
-                    self.read_hex_string()?;
-                    Some(Obj::Str(Rc::from(self.scratch.as_slice())))
+                    self.read_hex_string().map(|s| Obj::Str(Rc::new(s)))
                 }
             }
             b'[' => {
@@ -267,7 +260,7 @@ impl<'a> Lexer<'a> {
                         return None;
                     }
                 }
-                Some(Obj::Array(Rc::from(items)))
+                Some(Obj::Array(Rc::new(items)))
             }
             b'+' | b'-' | b'.' | b'0'..=b'9' => self.read_number_or_ref(),
             _ => {
@@ -290,15 +283,14 @@ impl<'a> Lexer<'a> {
             self.skip_ws();
             if self.data[self.pos.min(self.data.len())..].starts_with(b">>") {
                 self.pos += 2;
-                return Some(Dict(Rc::from(entries)));
+                return Some(Dict(Rc::new(entries)));
             }
             // Keys are owned by the dictionary and never resolved, so they need no Rc allocation.
             if depth >= MAX_NEST || self.peek()? != b'/' {
                 return None;
             }
             self.pos += 1;
-            self.read_name();
-            let key = self.scratch.clone();
+            let key = self.read_name();
             let value = self.parse_nested(depth + 1)?;
             if !entries.push((key, value), self.meter) {
                 return None;
@@ -306,10 +298,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Decodes a name (after its `/`) into `scratch`.
-    fn read_name(&mut self) {
-        let mut name = std::mem::take(&mut self.scratch);
-        name.clear();
+    fn read_name(&mut self) -> Vec<u8> {
+        let mut name = Vec::new();
         while let Some(b) = self.peek() {
             if is_ws(b) || is_delim(b) {
                 break;
@@ -326,20 +316,12 @@ impl<'a> Lexer<'a> {
             }
             name.push(b);
         }
-        self.scratch = name;
+        name
     }
 
-    /// Decodes a literal string into `scratch`.
-    fn read_literal_string(&mut self) -> Option<()> {
+    fn read_literal_string(&mut self) -> Option<Vec<u8>> {
         self.pos += 1; // (
-        let mut out = std::mem::take(&mut self.scratch);
-        out.clear();
-        let done = self.literal_string_into(&mut out);
-        self.scratch = out;
-        done
-    }
-
-    fn literal_string_into(&mut self, out: &mut Vec<u8>) -> Option<()> {
+        let mut out = Vec::new();
         let mut depth = 1usize;
         loop {
             let b = self.peek()?;
@@ -352,7 +334,7 @@ impl<'a> Lexer<'a> {
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
-                        return Some(());
+                        return Some(out);
                     }
                     out.push(b);
                 }
@@ -392,17 +374,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Decodes a hex string into `scratch`.
-    fn read_hex_string(&mut self) -> Option<()> {
+    fn read_hex_string(&mut self) -> Option<Vec<u8>> {
         self.pos += 1; // <
-        let mut out = std::mem::take(&mut self.scratch);
-        out.clear();
-        let done = self.hex_string_into(&mut out);
-        self.scratch = out;
-        done
-    }
-
-    fn hex_string_into(&mut self, out: &mut Vec<u8>) -> Option<()> {
+        let mut out = Vec::new();
         let mut half: Option<u8> = None;
         loop {
             let b = self.peek()?;
@@ -411,7 +385,7 @@ impl<'a> Lexer<'a> {
                 if let Some(h) = half {
                     out.push(h * 16);
                 }
-                return Some(());
+                return Some(out);
             }
             if is_ws(b) {
                 continue;
@@ -629,13 +603,11 @@ mod tests {
     }
 
     #[test]
-    fn names_and_strings_sharing_the_scratch_buffer_stay_separate() {
-        let Some(Obj::Array(items)) = Lexer::new(
-            b"[/Long#20Name (a\\(b\\)) /C <414> () /]",
-            0,
-            &Meter::new(u64::MAX),
-        )
-        .parse_obj() else {
+    fn consecutive_names_and_strings_decode_independently() {
+        let meter = Meter::new(u64::MAX);
+        let Some(Obj::Array(items)) =
+            Lexer::new(b"[/Long#20Name (a\\(b\\)) /C <414> () /]", 0, &meter).parse_obj()
+        else {
             panic!("array")
         };
         let bytes: Vec<&[u8]> = items
@@ -665,6 +637,6 @@ mod tests {
         let Some(Obj::Dict(nested)) = dict.get(b"Nested") else {
             panic!("nested dictionary")
         };
-        assert!(matches!(nested.get(b"B"), Some(Obj::Str(s)) if s[..] == *b"value"));
+        assert!(matches!(nested.get(b"B"), Some(Obj::Str(s)) if s.as_slice() == b"value"));
     }
 }

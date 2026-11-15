@@ -55,7 +55,8 @@ test('buffers are reused and discarded with the instance after errors', () => {
     for (let i = 0; i < 5; i++) expect(probe.check(pdf, 10)).toEqual(first)
     expect(allocations).toBe(initialAllocations)
     // Growing the input buffer must not invalidate the retained output buffer or earlier results.
-    const padded = new Uint8Array(pdf.length * 8).fill(32)
+    // Past one 64 KiB Wasm page, so the input buffer is replaced.
+    const padded = new Uint8Array(70_000).fill(32)
     padded.set(pdf)
     expect(probe.check(padded, 10)).toEqual(first)
     expect(probe.check(pdf, 10)).toEqual(first)
@@ -148,6 +149,39 @@ test('a failed re-instantiation after a trap does not hide the trap or keep stal
     expect(() => probe.check(pdf, 10)).toThrow('injected out of memory')
     expect(probe.check(pdf, 10)).toEqual(first)
     expect(probe.exports()).not.toBe(before)
+  } finally {
+    WebAssembly.Instance = OriginalInstance
+  }
+})
+
+test('a growing input gets a buffer sized to fit, not doubled', () => {
+  const OriginalInstance = WebAssembly.Instance
+  const sizes: number[] = []
+  WebAssembly.Instance = class extends OriginalInstance {
+    constructor(module: WebAssembly.Module, imports?: WebAssembly.Imports) {
+      super(module, imports)
+      const exports = this.exports as ReturnType<ReturnType<typeof loadPdfProbeWasm>['exports']>
+      Object.defineProperty(this, 'exports', { value: {
+        ...exports,
+        pdf_probe_alloc(len: number) {
+          sizes.push(len)
+          return exports.pdf_probe_alloc(len)
+        },
+      } })
+    }
+  }
+  try {
+    const probe = loadPdfProbeWasm(module)
+    const padded = (length: number) => {
+      const bytes = new Uint8Array(length).fill(32)
+      bytes.set(pdf)
+      return bytes
+    }
+    const expected = probe.check(pdf, 10)
+    sizes.length = 0
+    for (const length of [100_000, 131_072, 140_000]) expect(probe.check(padded(length), 10)).toEqual(expected)
+    // 100,000 rounds up to two 64 KiB pages, 131,072 fits in them, and 140,000 needs three pages (not four).
+    expect(sizes).toEqual([131_072, 196_608])
   } finally {
     WebAssembly.Instance = OriginalInstance
   }

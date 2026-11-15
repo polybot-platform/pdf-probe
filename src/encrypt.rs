@@ -39,7 +39,7 @@ pub(crate) struct Crypto {
 
 fn name_of(o: Option<&Obj>) -> Option<&[u8]> {
     match o {
-        Some(Obj::Name(n)) => Some(n.as_slice()),
+        Some(Obj::Name(n)) => Some(&n[..]),
         _ => None,
     }
 }
@@ -87,7 +87,7 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
         return fail("unsupported encryption version");
     }
     let bytes = |k: &[u8]| match d.get(k) {
-        Some(Obj::Str(s)) => s.as_slice(),
+        Some(Obj::Str(s)) => &s[..],
         _ => &[],
     };
     let (o, u) = (bytes(b"O"), bytes(b"U"));
@@ -119,7 +119,7 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
 
     let id0 = match doc.xref.trailer.get(b"ID") {
         Some(Obj::Array(a)) => match a.first() {
-            Some(Obj::Str(s)) => s.as_slice(),
+            Some(Obj::Str(s)) => &s[..],
             _ => &[],
         },
         _ => &[],
@@ -242,7 +242,7 @@ fn legacy_key(
 /// Algorithm 2.A for the user password (empty): revision 5 hashes with SHA-256, revision 6 with 2.B.
 fn v5_key(d: &Dict, r: i64, u: &[u8], meter: &Meter) -> Result<Option<Vec<u8>>, Failure> {
     let ue = match d.get(b"UE") {
-        Some(Obj::Str(s)) => s.as_slice(),
+        Some(Obj::Str(s)) => &s[..],
         _ => &[],
     };
     if u.len() < 48 || ue.len() < 32 {
@@ -324,7 +324,7 @@ impl Crypto {
     /// The crypt filter for this stream: a leading `/Crypt` filter names one, otherwise `/StmF` applies.
     fn method_for(&self, dict: &Dict) -> Method {
         let first = match dict.get(b"Filter") {
-            Some(Obj::Name(n)) => Some((n.as_slice(), 0usize)),
+            Some(Obj::Name(n)) => Some((&n[..], 0usize)),
             Some(Obj::Array(a)) => name_of(a.first()).map(|n| (n, 0)),
             _ => None,
         };
@@ -504,7 +504,7 @@ mod tests {
     fn dict_with_ue(ue: Vec<u8>) -> Dict {
         Dict(std::rc::Rc::new(crate::lexer::Items::from(vec![(
             b"UE".to_vec(),
-            Obj::Str(std::rc::Rc::new(ue)),
+            Obj::Str(std::rc::Rc::from(ue)),
         )])))
     }
 

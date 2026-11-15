@@ -3,6 +3,7 @@
 use crate::lexer::{Dict, Lexer, Obj};
 use crate::meter::{Meter, cost};
 use crate::{Failure, Limit, Limits, stream};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
@@ -215,11 +216,11 @@ fn read_xref_stream(
         return fail("not a cross-reference stream");
     };
     meter.charge(cost::SCAN * range.end.saturating_sub(lx.pos()) as u64)?;
-    if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n.as_slice() == b"XRef") {
+    if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n[..] == *b"XRef") {
         return fail("not a cross-reference stream");
     }
     let remaining = limits.max_decompressed.saturating_sub(*decoded);
-    let bytes = stream::decode(&dict, &data[range], remaining, meter)?;
+    let bytes = stream::decode(&dict, Cow::Borrowed(&data[range]), remaining, meter)?;
     *decoded += bytes.len();
     meter.charge(bytes.len() as u64)?; // reading the entries
 

@@ -20,10 +20,10 @@ fn from_inflate(why: &'static str) -> Failure {
 }
 
 /// Decodes `raw` through the stream dictionary's `/Filter` chain, writing at most `max_out` bytes per stage.
-/// Charges the meter for the work.
+/// Charges the meter for the work. With no filter to apply, `raw` is returned as given, owned or borrowed.
 pub(crate) fn decode<'a>(
     dict: &Dict,
-    raw: &'a [u8],
+    raw: Cow<'a, [u8]>,
     max_out: usize,
     meter: &Meter,
 ) -> Res<Cow<'a, [u8]>> {
@@ -45,15 +45,15 @@ pub(crate) fn decode<'a>(
     if parms.iter().any(|o| !matches!(o, Obj::Dict(_) | Obj::Null)) {
         return bad("indirect /DecodeParms are not supported yet");
     }
-    let mut data: Cow<[u8]> = Cow::Borrowed(raw);
+    let mut data = raw;
     for (i, filter) in filters.iter().enumerate() {
         let Obj::Name(name) = filter else {
             unreachable!()
         };
-        if name.as_slice() == b"Crypt" {
+        if &name[..] == b"Crypt" {
             continue; // handled by the security handler before decoding
         }
-        if name.as_slice() != b"FlateDecode" && name.as_slice() != b"Fl" {
+        if &name[..] != b"FlateDecode" && &name[..] != b"Fl" {
             return bad("unsupported filter");
         }
         meter.charge(cost::INFLATE_IN * data.len() as u64)?;
@@ -235,7 +235,7 @@ mod tests {
             let d = dict(source);
             for max_out in [3, 2, 0] {
                 assert!(matches!(
-                    decode(&d, b"abc", max_out, &meter).unwrap(),
+                    decode(&d, Cow::Borrowed(b"abc"), max_out, &meter).unwrap(),
                     Cow::Borrowed(b"abc")
                 ));
             }
@@ -243,17 +243,25 @@ mod tests {
     }
 
     #[test]
+    fn unfiltered_owned_input_is_passed_through_without_a_copy() {
+        let data = b"decrypted".to_vec();
+        let at = data.as_ptr();
+        let out = decode(&dict("<< >>"), Cow::Owned(data), 0, &Meter::new(u64::MAX)).unwrap();
+        assert!(matches!(&out, Cow::Owned(v) if v.as_ptr() == at));
+    }
+
+    #[test]
     fn filter_parameters_are_validated_before_decoding() {
         let d = dict("<< /Filter [/FlateDecode] /DecodeParms [null 1] >>");
         assert_eq!(
-            decode(&d, b"bad zlib", 10, &Meter::new(u64::MAX)),
+            decode(&d, Cow::Borrowed(b"bad zlib"), 10, &Meter::new(u64::MAX)),
             Err(Failure::Unparseable(
                 "indirect /DecodeParms are not supported yet"
             ))
         );
         let d = dict("<< /Filter [/FlateDecode 1] >>");
         assert_eq!(
-            decode(&d, b"bad zlib", 10, &Meter::new(u64::MAX)),
+            decode(&d, Cow::Borrowed(b"bad zlib"), 10, &Meter::new(u64::MAX)),
             Err(Failure::Unparseable("unsupported /Filter entry"))
         );
     }

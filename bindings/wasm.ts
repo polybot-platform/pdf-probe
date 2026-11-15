@@ -40,18 +40,20 @@ export function loadPdfProbeWasm(wasm: BufferSource | WebAssembly.Module, option
     if (x.pdf_probe_abi_version() !== ABI_VERSION) throw new Error('pdf-probe wasm ABI mismatch')
     return x
   }
-  let x = instantiate()
+  // Undefined after a trap, an error or a recycle; the next use makes a fresh instance.
+  let instance: Exports | undefined = instantiate()
+  const live = (): Exports => (instance ??= instantiate())
   let recycles = 0
   type Buffer = { ptr: number; capacity: number }
   let input: Buffer | undefined
   let output: Buffer | undefined
 
-  function reset() {
-    x = instantiate()
-    input = output = undefined
+  /** Drops the instance and the pointers into its memory. Never throws, so it cannot mask the error that caused it. */
+  function discard() {
+    instance = input = output = undefined
   }
 
-  function reserve(buffer: Buffer | undefined, needed: number, ceiling: number): Buffer | undefined {
+  function reserve(x: Exports, buffer: Buffer | undefined, needed: number, ceiling: number): Buffer | undefined {
     if (needed === 0 || (buffer && buffer.capacity >= needed)) return buffer
     const capacity = Math.max(needed, Math.min((buffer?.capacity ?? 0) * 2, ceiling))
     if (buffer) x.pdf_probe_free(buffer.ptr, buffer.capacity)
@@ -66,28 +68,29 @@ export function loadPdfProbeWasm(wasm: BufferSource | WebAssembly.Module, option
     const inputLimit = maxInputBytes || DEFAULT_MAX_INPUT_BYTES
     if (bytes.length > inputLimit) return { status: 'limitExceeded', limit: 'inputBytes' }
     try {
-      input = reserve(input, bytes.length, inputLimit)
+      const x = live()
+      input = reserve(x, input, bytes.length, inputLimit)
       const inPtr = input?.ptr ?? 0
       // `memory.buffer` is replaced when the memory grows, so views are made fresh after every call.
       new Uint8Array(x.memory.buffer, inPtr, bytes.length).set(bytes)
       const want = bufferSizeFor(maxPages)
-      output = reserve(output, want, want)!
+      output = reserve(x, output, want, want)!
       let needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, maxInputBytes, maxWorkMillions, output.ptr, output.capacity)
       if (needed > output.capacity) {
-        output = reserve(output, needed, needed)!
+        output = reserve(x, output, needed, needed)!
         needed = x.pdf_probe_check(inPtr, bytes.length, maxPages, maxInputBytes, maxWorkMillions, output.ptr, output.capacity)
       }
       if (needed < 0) throw new Error(`pdf_probe_check failed with ${needed}`)
       // The decoded result owns its values; buffers can be reused by the next check.
       const result = decodeResult(new Uint8Array(x.memory.buffer, output.ptr, needed), needed)
       if (x.memory.buffer.byteLength > recycleAboveBytes) {
-        reset()
+        discard()
         recycles++
       }
       return result
     } catch (error) {
       // Discard retained pointers with the instance, including after a host-side copy/decode error.
-      reset()
+      discard()
       if (error instanceof WebAssembly.RuntimeError) {
         // A trap leaves the instance in an unknown state: discard it.
         return { status: 'panic', reason: error.message }
@@ -99,10 +102,10 @@ export function loadPdfProbeWasm(wasm: BufferSource | WebAssembly.Module, option
   return {
     check,
     /** The size of the module's linear memory, in bytes. It grows with the largest input and never shrinks. */
-    memoryBytes: () => x.memory.buffer.byteLength,
+    memoryBytes: () => live().memory.buffer.byteLength,
     /** How many times the instance was replaced because its memory passed the threshold. */
     recycleCount: () => recycles,
     /** For tests: the raw exports of the live instance. */
-    exports: () => x,
+    exports: live,
   }
 }

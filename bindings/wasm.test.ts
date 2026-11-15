@@ -1,5 +1,6 @@
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { decodeResult, DEFAULT_MAX_INPUT_BYTES } from './result.ts'
 import { loadPdfProbeWasm } from './wasm.ts'
 
 const module = new WebAssembly.Module(readFileSync(new URL('../npm/dist/pdf_probe.wasm', import.meta.url)))
@@ -94,4 +95,60 @@ test('growing a result buffer keeps page sizes and earlier results intact', () =
   expect(result.sizes.every(([w, h]) => w === 300 && h === 400)).toBe(true)
   expect(probe.check(pdf, 10)).toEqual(small)
   expect(result.sizes.length).toBe(pages)
+})
+
+test('the host-side input default matches the module default', () => {
+  // Bypass the host pre-check and let the module apply its own default (maxInputBytes = 0).
+  const x = loadPdfProbeWasm(module).exports()
+  const out = x.pdf_probe_alloc(256)
+  const statusAt = (length: number) => {
+    const data = x.pdf_probe_alloc(length)
+    const needed = x.pdf_probe_check(data, length, 10, 0, 0, out, 256)
+    const result = decodeResult(new Uint8Array(x.memory.buffer, out, needed), needed)
+    x.pdf_probe_free(data, length)
+    return result
+  }
+  expect(statusAt(DEFAULT_MAX_INPUT_BYTES + 1)).toEqual({ status: 'limitExceeded', limit: 'inputBytes' })
+  expect(statusAt(DEFAULT_MAX_INPUT_BYTES)).not.toEqual({ status: 'limitExceeded', limit: 'inputBytes' })
+})
+
+test('a failed re-instantiation after a trap does not hide the trap or keep stale state', () => {
+  const OriginalInstance = WebAssembly.Instance
+  let trap = false
+  let failInstantiation = false
+  WebAssembly.Instance = class extends OriginalInstance {
+    constructor(module: WebAssembly.Module, imports?: WebAssembly.Imports) {
+      if (failInstantiation) {
+        failInstantiation = false
+        throw new RangeError('injected out of memory')
+      }
+      super(module, imports)
+      const exports = this.exports as ReturnType<ReturnType<typeof loadPdfProbeWasm>['exports']>
+      Object.defineProperty(this, 'exports', { value: {
+        ...exports,
+        pdf_probe_check(...args: Parameters<typeof exports.pdf_probe_check>) {
+          if (trap) {
+            trap = false
+            throw new WebAssembly.RuntimeError('injected trap')
+          }
+          return exports.pdf_probe_check(...args)
+        },
+      } })
+    }
+  }
+  try {
+    const probe = loadPdfProbeWasm(module)
+    const first = probe.check(pdf, 10)
+    const before = probe.exports()
+    trap = true
+    failInstantiation = true
+    // The trap is reported as such; replacing the instance is left to the next call.
+    expect(probe.check(pdf, 10)).toEqual({ status: 'panic', reason: 'injected trap' })
+    // That call fails to instantiate and says so, without reusing the trapped instance.
+    expect(() => probe.check(pdf, 10)).toThrow('injected out of memory')
+    expect(probe.check(pdf, 10)).toEqual(first)
+    expect(probe.exports()).not.toBe(before)
+  } finally {
+    WebAssembly.Instance = OriginalInstance
+  }
 })

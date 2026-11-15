@@ -23,6 +23,7 @@ export type LimitName = 'inputBytes' | 'work' | 'objects' | 'xrefSections' | 'de
 
 export const ABI_VERSION = 3
 export const HEADER = 16
+/** Rust's `Limits::default().max_input_bytes`. A test in ffi/src/lib.rs checks the two match. */
 export const DEFAULT_MAX_INPUT_BYTES = 10 * 1024 * 1024
 const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic', 'limitExceeded'] as const
 const DECODER = new TextDecoder()

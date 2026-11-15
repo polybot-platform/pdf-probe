@@ -227,6 +227,22 @@ mod tests {
     }
 
     #[test]
+    fn the_typescript_input_default_matches_the_library() {
+        // The wasm binding rejects oversized inputs before copying them into linear memory, using its own copy
+        // of the default. Keep the two in step.
+        let ts = include_str!("../../bindings/result.ts");
+        let expected = format!(
+            "export const DEFAULT_MAX_INPUT_BYTES = {} * 1024 * 1024\n",
+            Limits::default().max_input_bytes >> 20
+        );
+        assert_eq!(Limits::default().max_input_bytes % (1 << 20), 0);
+        assert!(
+            ts.contains(&expected),
+            "bindings/result.ts should contain {expected:?}"
+        );
+    }
+
+    #[test]
     fn a_successful_answer_has_a_header_and_the_sizes() {
         let probe = Probe {
             work: 0,

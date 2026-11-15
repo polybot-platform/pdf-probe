@@ -64,9 +64,8 @@ pub(crate) fn decode<'a>(
             _ => inflated,
         });
     }
-    if data.len() > max_out {
-        return Err(Failure::LimitExceeded(Limit::Decompressed));
-    }
+    // Each inflate stage is already capped at `max_out` and predictors only shrink their input. Unfiltered
+    // data is the file's own bytes, so it is not counted against the decompression limit.
     Ok(data)
 }
 
@@ -230,18 +229,16 @@ mod tests {
     }
 
     #[test]
-    fn unfiltered_streams_are_borrowed_and_still_obey_the_output_cap() {
+    fn unfiltered_streams_are_borrowed_and_not_capped() {
         let meter = Meter::new(u64::MAX);
         for source in ["<< >>", "<< /Filter /Crypt >>", "<< /Filter [] >>"] {
             let d = dict(source);
-            assert!(matches!(
-                decode(&d, b"abc", 3, &meter).unwrap(),
-                Cow::Borrowed(b"abc")
-            ));
-            assert_eq!(
-                decode(&d, b"abc", 2, &meter),
-                Err(Failure::LimitExceeded(Limit::Decompressed))
-            );
+            for max_out in [3, 2, 0] {
+                assert!(matches!(
+                    decode(&d, b"abc", max_out, &meter).unwrap(),
+                    Cow::Borrowed(b"abc")
+                ));
+            }
         }
     }
 

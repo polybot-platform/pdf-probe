@@ -1,7 +1,7 @@
 // Loads the pdf-probe shared library with bun:ffi. A thin wrapper over one C function: see ffi/src/lib.rs
 // for the result layout. `bun:ffi` is imported lazily so that this file can be bundled into a package that
 // also runs under Node, where the native engine is simply never loaded.
-import { ABI_VERSION, bufferSizeFor, decodeResult, DEFAULT_MAX_INPUT_BYTES, HEADER, type ProbeResult } from './result.ts'
+import { ABI_VERSION, bufferSizeFor, decodeResult, HEADER, type ProbeResult } from './result.ts'
 
 export type { PageSize, ProbeResult } from './result.ts'
 
@@ -34,7 +34,6 @@ export async function loadPdfProbe(path?: string) {
    * `maxInputBytes` and `maxWorkMillions` of 0 mean the library's defaults.
    */
   function check(bytes: Uint8Array, maxPages: number, maxInputBytes = 0, maxWorkMillions = 0): ProbeResult {
-    if (bytes.length > (maxInputBytes || DEFAULT_MAX_INPUT_BYTES)) return { status: 'limitExceeded', limit: 'inputBytes' }
     const want = bufferSizeFor(maxPages)
     if (out.length < want) out = new Uint8Array(want)
     const call = () =>

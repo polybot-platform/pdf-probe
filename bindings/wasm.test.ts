@@ -186,3 +186,21 @@ test('a growing input gets a buffer sized to fit, not doubled', () => {
     WebAssembly.Instance = OriginalInstance
   }
 })
+
+test('a real panic inside the module is a trap: reported as panic, and the instance is replaced', () => {
+  // Built with the test-only force-panic feature by `bun run panic:build`.
+  const path = new URL('../target/force-panic/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url)
+  const probe = loadPdfProbeWasm(readFileSync(path))
+  const expected = probe.check(pdf, 10)
+  expect(expected.status).toBe('ok')
+  const forced = new TextEncoder().encode(new TextDecoder().decode(pdf).replace('[0 0 300 400]', '[0 0 300 400 /PdfProbeForcePanic]'))
+  for (let i = 0; i < 3; i++) {
+    const before = probe.exports()
+    const result = probe.check(forced, 10)
+    expect(result.status).toBe('panic')
+    expect(probe.exports()).not.toBe(before)
+    expect(probe.check(pdf, 10)).toEqual(expected)
+  }
+  // The shipped module, built without the feature, reads the same file.
+  expect(loadPdfProbeWasm(module).check(forced, 10).status).toBe('ok')
+})

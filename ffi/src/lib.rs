@@ -374,6 +374,84 @@ mod tests {
         assert_eq!(abi_version(), ABI_VERSION);
     }
 
+    /// A one-page file with a correct cross-reference table. The page inherits `/MediaBox 3 0 R`, an array of
+    /// `items` zeros followed by `tail`. The box is not a valid one, so the page gets the default size.
+    #[cfg(feature = "force-panic")]
+    fn big_box(items: usize, tail: &str) -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox 3 0 R >>".to_string(),
+            format!("[{}{tail}]", "0 ".repeat(items)),
+            "<< /Type /Page /Parent 2 0 R >>".to_string(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for at in offsets {
+            out.extend_from_slice(format!("{at:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// Needs the test-only `force-panic` feature, in its own target directory:
+    /// `CARGO_TARGET_DIR=target/force-panic cargo test --release -p pdf-probe-ffi --features force-panic`.
+    #[cfg(feature = "force-panic")]
+    #[test]
+    #[allow(unsafe_code)]
+    fn a_real_panic_in_the_parser_is_a_status_and_the_next_calls_are_unaffected() {
+        let call = |pdf: &[u8]| {
+            let mut out = vec![0u8; 4096];
+            // SAFETY: the pointers and lengths describe live buffers.
+            let needed =
+                unsafe { abi_check(pdf.as_ptr(), pdf.len(), 10, out.as_mut_ptr(), out.len()) };
+            out.truncate(usize::try_from(needed).unwrap());
+            out
+        };
+        let status = |b: &[u8]| {
+            (
+                u32_at(b, 0),
+                String::from_utf8_lossy(&b[HEADER..]).into_owned(),
+            )
+        };
+        // Just under and just over the default value limit of 1,000,000 items alive at once.
+        let under = big_box(900_000, "");
+        let over = big_box(1_100_000, "");
+        // Panics after 600,000 items of the array are parsed and alive.
+        let panics = big_box(600_000, " /PdfProbeForcePanic");
+        assert_eq!(u32_at(&call(&under), 0), STATUS_OK);
+        assert_eq!(
+            status(&call(&over)),
+            (STATUS_LIMIT_EXCEEDED, "values".into())
+        );
+        for _ in 0..3 {
+            let (code, reason) = status(&call(&panics));
+            assert_eq!(code, STATUS_PANIC);
+            assert!(reason.contains("forced panic"), "{reason}");
+            // The same thread goes on to give the same answers on both sides of the limit. (Each call counts
+            // from where it began, so this holds even if items were left counted; the library's own test,
+            // `a_panic_while_parsing_gives_back_the_items_it_had_parsed`, checks that none are.)
+            assert_eq!(u32_at(&call(&under), 0), STATUS_OK);
+            assert_eq!(
+                status(&call(&over)),
+                (STATUS_LIMIT_EXCEEDED, "values".into())
+            );
+        }
+    }
+
     /// The C function with the default input cap and work budget (0, 0).
     #[allow(unsafe_code)]
     unsafe fn abi_check(data: *const u8, len: usize, max: u32, out: *mut u8, cap: usize) -> i32 {

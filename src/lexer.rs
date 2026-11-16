@@ -10,6 +10,10 @@ use std::rc::Rc;
 /// Deepest allowed nesting of arrays and dictionaries.
 const MAX_NEST: usize = 64;
 
+/// With the `force-panic` feature, parsing this name as a value panics.
+#[cfg(feature = "force-panic")]
+const FORCE_PANIC_NAME: &[u8] = b"PdfProbeForcePanic";
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Obj {
     Null,
@@ -235,7 +239,14 @@ impl<'a> Lexer<'a> {
         match self.peek()? {
             b'/' => {
                 self.pos += 1;
-                Some(Obj::Name(Rc::new(self.read_name())))
+                let name = self.read_name();
+                // Test builds only (see the feature in Cargo.toml): a real panic in the middle of parsing,
+                // with the items parsed so far still alive, so the hosts' panic handling can be tested.
+                #[cfg(feature = "force-panic")]
+                if name == FORCE_PANIC_NAME {
+                    panic!("pdf-probe: forced panic (the force-panic feature is on)");
+                }
+                Some(Obj::Name(Rc::new(name)))
             }
             b'(' => self.read_literal_string().map(|s| Obj::Str(Rc::new(s))),
             b'<' => {

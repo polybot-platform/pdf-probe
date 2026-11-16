@@ -158,6 +158,12 @@ bun run panic:build                     # the panic builds that npm:test and bin
    fuzz/run.sh 300 8
    ```
    Uses `rustc` sanitizer-coverage flags on stable Rust (or `cargo +nightly fuzz run probe`).
+3. **AddressSanitizer (nightly Rust and `cargo install cargo-fuzz`):**
+   ```bash
+   cd fuzz && cargo +nightly fuzz run -a probe   # the parser
+   cd fuzz && cargo +nightly fuzz run -a ffi     # the C ABI (`pdf_probe_check`), the only unsafe code
+   ```
+   The `ffi` target calls `pdf_probe_check` with exactly sized input and output buffers, so ASan reports any read or write past them. It also checks that a buffer too small for the answer isn't written to. Its inputs start with 4 control bytes (output buffer size and page cap), followed by the PDF.
 
 ---
 

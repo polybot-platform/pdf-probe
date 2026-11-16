@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 pdf-probe = { path = ".." }
 
+[features]
+# For tests only: see the feature of the same name in ../Cargo.toml.
+force-panic = ["pdf-probe/force-panic"]
+
 [lints.rust]
 # The parser forbids unsafe code. This crate is the only place that needs it (raw pointers across the C ABI),
 # and it is confined to the `abi` module below.

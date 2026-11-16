@@ -115,13 +115,16 @@ function buildPdf(objects) {
   return new TextEncoder().encode(out)
 }
 
-/** The root Pages node inherits /MediaBox 3 0 R, a big array, so every page re-parses it: pages x array size. */
-function bigInheritedBox(pages, elements) {
+/**
+ * The root Pages node inherits /MediaBox 3 0 R, a big array (`elements` zeros, then `tail`), so every page
+ * re-parses it: pages x array size.
+ */
+function bigInheritedBox(pages, elements, tail = '') {
   const kids = Array.from({ length: pages }, (_, i) => `${4 + i} 0 R`).join(' ')
   return buildPdf([
     [1, '<< /Type /Catalog /Pages 2 0 R >>'],
     [2, `<< /Type /Pages /Kids [${kids}] /Count ${pages} /MediaBox 3 0 R >>`],
-    [3, `[${'0 '.repeat(elements)}]`],
+    [3, `[${'0 '.repeat(elements)}${tail}]`],
     ...Array.from({ length: pages }, (_, i) => [4 + i, '<< /Type /Page /Parent 2 0 R >>']),
   ])
 }
@@ -167,6 +170,51 @@ for (const engine of engines) {
     const first = probe.check(hostile, { maxWork: 3_000_000 })
     for (let i = 0; i < 3; i++) assert.deepEqual(probe.check(hostile, { maxWork: 3_000_000 }), first)
     assert.deepEqual(first, { status: 'limitExceeded', limit: 'work' })
+  })
+}
+
+// --- a real panic inside the library ---------------------------------------------------------------------
+// `bun run panic:build` builds the native library and the wasm module with the test-only `force-panic` feature
+// into target/force-panic: parsing the name /PdfProbeForcePanic as a value panics. The native library catches
+// the panic at its boundary; in wasm it is a trap. Either way the host must get a result and keep working.
+
+const panicBuilds = {
+  wasm: fileURLToPath(new URL('../../target/force-panic/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url)),
+  native: fileURLToPath(
+    new URL(`../../target/force-panic/release/libpdf_probe_ffi.${process.platform === 'darwin' ? 'dylib' : 'so'}`, import.meta.url),
+  ),
+}
+// Panics after 600,000 items of the array are parsed.
+const forcedPanic = bigInheritedBox(1, 600_000, ' /PdfProbeForcePanic')
+
+for (const engine of isBun ? ['wasm', 'native'] : ['wasm']) {
+  test(`${engine}: a real panic in the parser is a result, and the probe keeps working`, async () => {
+    const build = panicBuilds[engine]
+    assert.ok(existsSync(build), `${build} is missing: run \`bun run panic:build\` first`)
+    const probe = await createProbe(engine === 'wasm' ? { engine, wasm: build } : { engine, nativeLibrary: build })
+    const expected = probe.check(pdf)
+    assert.equal(expected.status, 'ok')
+    // Just under and just over the default value limit of 1,000,000 items alive at once.
+    const under = bigInheritedBox(1, 900_000)
+    const over = bigInheritedBox(1, 1_100_000)
+    for (let i = 0; i < 3; i++) {
+      const result = probe.check(forcedPanic)
+      assert.equal(result.status, 'panic')
+      // Native: the panic message. Wasm: the runtime's trap message, which differs between Node and Bun.
+      if (engine === 'native') assert.match(result.reason, /forced panic/)
+      else assert.ok(typeof result.reason === 'string' && result.reason.length > 0)
+      assert.deepEqual(probe.check(pdf), expected)
+      assert.equal(probe.check(under).status, 'ok')
+      assert.deepEqual(probe.check(over), { status: 'limitExceeded', limit: 'values' })
+    }
+  })
+}
+
+for (const engine of engines) {
+  test(`${engine}: the shipped build has no panic trigger`, async () => {
+    const probe = await createProbe({ engine })
+    // The name is only an odd entry in an invalid box, so the page gets the default size.
+    assert.equal(probe.check(forcedPanic).status, 'ok')
   })
 }
 

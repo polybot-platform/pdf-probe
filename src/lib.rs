@@ -651,6 +651,40 @@ mod tests {
         assert_eq!((repaired.pages, repaired.repaired), (300, true));
     }
 
+    /// Needs the test-only `force-panic` feature: `cargo test --features force-panic` (in its own target
+    /// directory, as in Cargo.toml).
+    #[cfg(feature = "force-panic")]
+    #[test]
+    fn a_panic_while_parsing_gives_back_the_items_it_had_parsed() {
+        // The page inherits a box that panics after 50,000 items; the root and pages tree are parsed and
+        // shared by then too.
+        let array = format!("[{} /PdfProbeForcePanic]", "0 ".repeat(50_000));
+        let pdf = build(
+            &[
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (
+                    2,
+                    "<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox 3 0 R >>",
+                ),
+                (3, &array),
+                (4, "<< /Type /Page /Parent 2 0 R >>"),
+            ],
+            1,
+        );
+        // Read directly, and through the rescan of a damaged copy.
+        for pdf in [pdf.clone(), with_startxref(pdf, "1")] {
+            let before = crate::lexer::live_items();
+            let caught = std::panic::catch_unwind(|| probe(&pdf, &Limits::default())).unwrap_err();
+            assert!(
+                caught
+                    .downcast_ref::<&str>()
+                    .unwrap()
+                    .contains("forced panic")
+            );
+            assert_eq!(crate::lexer::live_items(), before);
+        }
+    }
+
     #[test]
     fn the_value_limit_is_reported_when_the_rescan_hits_it() {
         // A wrong startxref sends the call to the rescan, which skips objects it cannot parse.

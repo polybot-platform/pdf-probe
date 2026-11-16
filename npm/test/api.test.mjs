@@ -11,9 +11,10 @@ const pdf = new TextEncoder().encode(
   '%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>\nendobj\n4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] /Rotate 90 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n',
 )
 const wasmPath = fileURLToPath(new URL('../dist/pdf_probe.wasm', import.meta.url))
-const nativePath = fileURLToPath(
-  new URL(`../native/${process.platform}-${process.arch}/libpdf_probe_ffi.${process.platform === 'darwin' ? 'dylib' : 'so'}`, import.meta.url),
-)
+// The native library's file name, as Cargo names it (and npm/build.ts copies it) on this platform.
+const nativeFile =
+  process.platform === 'win32' ? 'pdf_probe_ffi.dll' : `libpdf_probe_ffi.${process.platform === 'darwin' ? 'dylib' : 'so'}`
+const nativePath = fileURLToPath(new URL(`../native/${process.platform}-${process.arch}/${nativeFile}`, import.meta.url))
 const hasNative = isBun && existsSync(nativePath)
 
 test('reads the page count and sizes (wasm)', async () => {
@@ -180,9 +181,7 @@ for (const engine of engines) {
 
 const panicBuilds = {
   wasm: fileURLToPath(new URL('../../target/force-panic/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url)),
-  native: fileURLToPath(
-    new URL(`../../target/force-panic/release/libpdf_probe_ffi.${process.platform === 'darwin' ? 'dylib' : 'so'}`, import.meta.url),
-  ),
+  native: fileURLToPath(new URL(`../../target/force-panic/release/${nativeFile}`, import.meta.url)),
 }
 // Panics after 600,000 items of the array are parsed.
 const forcedPanic = bigInheritedBox(1, 600_000, ' /PdfProbeForcePanic')
@@ -212,7 +211,8 @@ for (const engine of isBun ? ['wasm', 'native'] : ['wasm']) {
 
 for (const engine of engines) {
   test(`${engine}: the shipped build has no panic trigger`, async () => {
-    const probe = await createProbe({ engine })
+    // The packaged files themselves, not whatever PDF_PROBE_NATIVE_LIBRARY or the defaults would find.
+    const probe = await createProbe(engine === 'wasm' ? { engine, wasm: wasmPath } : { engine, nativeLibrary: nativePath })
     // The name is only an odd entry in an invalid box, so the page gets the default size.
     assert.equal(probe.check(forcedPanic).status, 'ok')
   })

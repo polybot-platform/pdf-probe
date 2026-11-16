@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-probe"
-version = "0.0.0"
+version = "0.3.0"
 
 [[package]]
 name = "pdf-probe-fuzz"

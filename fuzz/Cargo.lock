@@ -74,11 +74,19 @@ name = "pdf-probe"
 version = "0.3.0"
 
 [[package]]
+name = "pdf-probe-ffi"
+version = "0.3.0"
+dependencies = [
+ "pdf-probe",
+]
+
+[[package]]
 name = "pdf-probe-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "pdf-probe",
+ "pdf-probe-ffi",
 ]
 
 [[package]]

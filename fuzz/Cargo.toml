@@ -10,10 +10,18 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 pdf-probe = { path = ".." }
+pdf-probe-ffi = { path = "../ffi" }
 
 [[bin]]
 name = "probe"
 path = "fuzz_targets/probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ffi"
+path = "fuzz_targets/ffi.rs"
 test = false
 doc = false
 bench = false

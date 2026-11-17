@@ -11,6 +11,9 @@ fail() {
 }
 
 dir="${1:?usage: tools/publish-npm.sh <tarballs-dir>}"
+# Absolute, so that `npm publish <file>` is never given `tarballs/x.tgz`, which npm reads as the GitHub
+# repository `tarballs/x.tgz` and tries to clone over ssh. This is what the first 0.5.1 release run tripped on.
+dir=$(cd "$dir" && pwd)
 manifest() { tar -xzOf "$1" package/package.json; }
 
 main=""

@@ -226,13 +226,14 @@ mod tests {
         // of the default. Keep the two in step.
         let ts = include_str!("../../bindings/result.ts");
         let expected = format!(
-            "export const DEFAULT_MAX_INPUT_BYTES = {} * 1024 * 1024\n",
+            "export const DEFAULT_MAX_INPUT_BYTES = {} * 1024 * 1024",
             Limits::default().max_input_bytes >> 20
         );
         assert_eq!(Limits::default().max_input_bytes % (1 << 20), 0);
+        // By line, so a checkout with Windows line endings (CRLF) matches too.
         assert!(
-            ts.contains(&expected),
-            "bindings/result.ts should contain {expected:?}"
+            ts.lines().any(|line| line == expected),
+            "bindings/result.ts should contain the line {expected:?}"
         );
     }
 

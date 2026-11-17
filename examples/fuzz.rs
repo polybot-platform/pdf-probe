@@ -317,6 +317,7 @@ fn outcome(r: &Result<pdf_probe::Probe, Failure>) -> String {
         Err(Failure::TooManyPages { .. }) => "toomany".into(),
         Err(Failure::Unparseable(why)) => format!("err:{why}"),
         Err(Failure::LimitExceeded(limit)) => format!("limit:{}", limit.name()),
+        Err(other) => format!("other:{other:?}"),
     }
 }
 
@@ -374,13 +375,11 @@ fn main() {
         .collect();
     assert!(!pool.is_empty(), "no seed files in {dir}");
     let seeds = pool.len();
-    let limits = Limits {
-        max_pages: 1000,
-        max_objects: 200_000,
-        max_xref_sections: 64,
-        max_decompressed: 8 << 20,
-        ..Limits::default()
-    };
+    let limits = Limits::default()
+        .max_pages(1000)
+        .max_objects(200_000)
+        .max_xref_sections(64)
+        .max_decompressed(8 << 20);
 
     // Silence the default panic message; panics are reported as findings.
     std::panic::set_hook(Box::new(|_| {}));

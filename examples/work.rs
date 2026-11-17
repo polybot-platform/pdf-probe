@@ -4,12 +4,10 @@ use pdf_probe::{Limits, probe};
 use std::time::Instant;
 
 fn main() {
-    let limits = Limits {
-        max_work: u64::MAX,
-        max_input_bytes: usize::MAX,
-        max_values: usize::MAX,
-        ..Limits::default()
-    };
+    let limits = Limits::default()
+        .max_work(u64::MAX)
+        .max_input_bytes(usize::MAX)
+        .max_values(usize::MAX);
     for dir in std::env::args().skip(1) {
         let mut rows: Vec<(u64, usize, f64, String)> = Vec::new(); // work, bytes, ns, name
         for entry in std::fs::read_dir(&dir).expect("dir").filter_map(Result::ok) {

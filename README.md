@@ -43,10 +43,7 @@ switch (result.status) {
 ```rust
 use pdf_probe::{Limits, probe};
 
-let result = probe(&bytes, &Limits {
-    max_pages: 200,
-    ..Limits::default()
-});
+let result = probe(&bytes, &Limits::default().max_pages(200));
 ```
 
 ---
@@ -77,7 +74,7 @@ Because the input is hostile, every loop and allocation is bounded. Hitting a re
 | Work budget | `2^30` units (~1.07B) | `max_work` / `maxWork` | `work` |
 | Page cap | 10,000 | `max_pages` / `maxPages` | returns `TooManyPages` / `tooManyPages` |
 | Objects, xref sections, inflated bytes | 1,000,000 / 256 / 64 MiB | Rust `Limits` struct | `objects`, `xrefSections`, `decompressed` |
-| Parsed values alive at once (bounds memory) | 1,000,000 | Rust `Limits` struct (`max_values`) | `values` |
+| Parsed values alive at once (bounds memory) | 1,000,000 | Rust `Limits::max_values` | `values` |
 
 Nesting depth (arrays/dictionaries) and page-tree depth are fixed at 64.
 

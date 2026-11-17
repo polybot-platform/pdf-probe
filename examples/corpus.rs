@@ -73,6 +73,10 @@ fn main() {
             Err(Failure::Unparseable(why)) => {
                 format!("{{\"verdict\":\"unparseable\",\"err\":{}}}", json_str(why))
             }
+            Err(other) => format!(
+                "{{\"verdict\":\"unparseable\",\"err\":{}}}",
+                json_str(&format!("{other:?}"))
+            ),
         };
         entries.push(format!("{}:{body}", json_str(&name)));
     }

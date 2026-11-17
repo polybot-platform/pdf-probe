@@ -43,7 +43,18 @@ Both engines return byte-for-byte identical answers across the synthetic corpus 
 
 `createProbe()` defaults to `engine: 'auto'`: under Bun it uses the native library when one is found, and WebAssembly everywhere else.
 
-**This package ships the WebAssembly module only** (~125 KB). To use the native engine under Bun, build `libpdf_probe_ffi` from the [repository](https://github.com/polybot-platform/pdf-probe) (`cargo build --release -p pdf-probe-ffi`) and pass its path via `nativeLibrary` or `PDF_PROBE_NATIVE_LIBRARY` (or place it in `native/<platform>-<arch>/`).
+**This package carries the WebAssembly module (~125 KB). The native library comes in a package of its own for each platform**, listed as an optional dependency, so npm installs only the one for your machine (about 250 KB) and `createProbe()` under Bun finds it with no configuration:
+
+| Platform | Package |
+|---|---|
+| Linux x64, glibc 2.28 or later | `pdf-probe-linux-x64` |
+| Linux arm64, glibc 2.28 or later | `pdf-probe-linux-arm64` |
+| Linux x64, musl (Alpine) | `pdf-probe-linux-x64-musl` |
+| macOS, Apple silicon | `pdf-probe-darwin-arm64` |
+| macOS, Intel | `pdf-probe-darwin-x64` |
+| Windows x64 | `pdf-probe-win32-x64` |
+
+On any other platform, or with `npm install --omit=optional`, `engine: 'auto'` uses WebAssembly, and `engine: 'native'` throws an error that says what is missing. To use a library you built yourself (`cargo build --release -p pdf-probe-ffi` in the [repository](https://github.com/polybot-platform/pdf-probe)), pass its path as `nativeLibrary`, or set `PDF_PROBE_NATIVE_LIBRARY`; either wins over the installed package.
 
 ## `bun build --compile`
 

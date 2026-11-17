@@ -6,7 +6,8 @@ and gives it a token that lives for one run. There is no API token to store, rot
 
 ## Cutting a release
 
-1. **Bump the version** in `Cargo.toml`, `ffi/Cargo.toml` and `npm/package.json` (they move together), and
+1. **Bump the version** in `Cargo.toml`, `ffi/Cargo.toml` and `npm/package.json` (they move together; in
+   `npm/package.json` that includes every entry of `optionalDependencies`, which a test checks), and
    refresh the lockfiles: `cargo update -w` in the repository root and in `fuzz/`. Open a PR, get CI green,
    merge it.
 2. **Tag the merge commit on `main`** and push the tag:
@@ -18,8 +19,18 @@ and gives it a token that lives for one run. There is no API token to store, rot
 3. **Approve the run.** The *Release* workflow verifies the tag, runs the tests and a `cargo publish --dry-run`,
    then waits for a reviewer on the `release` environment. Approve it on the workflow run's page to publish.
 4. **Write the GitHub release** for the tag: what is breaking, what is new, what is unchanged.
-5. **Publish the npm package** (`cd npm && npm publish`; not done by CI yet). npm can take several minutes to
-   show a new version.
+5. **Publish the npm packages** (not done by CI yet), the six platform packages first and `pdf-probe` last,
+   because `pdf-probe` lists them as optional dependencies at its own version. Until they exist, an install
+   quietly skips them and falls back to WebAssembly.
+   ```sh
+   # The libraries are the artifacts of the Native library workflow run on the tagged commit:
+   gh run download <run-id> --dir libs --pattern 'pdf-probe-native-*'   # libs/pdf-probe-native-<key>/<file>
+   for d in libs/pdf-probe-native-*; do mkdir -p libs-by-key && cp -r "$d" "libs-by-key/${d#libs/pdf-probe-native-}"; done
+   bun npm/native-packages.ts libs-by-key                              # writes npm/native-packages/<key>/
+   for p in npm/native-packages/*/; do (cd "$p" && npm publish); done
+   bun run npm:build && (cd npm && npm publish)
+   ```
+   npm can take several minutes to show a new version.
 6. **Check it:** the version on https://crates.io/crates/pdf-probe, the docs.rs build, and `cargo add pdf-probe`
    in an empty project.
 

@@ -1,6 +1,6 @@
 {
   "name": "pdf-probe",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A small, fail-closed reader for untrusted PDFs: page count, effective page sizes, and structural flags. WebAssembly and native FFI for Node, Bun, and browsers.",
   "license": "MIT OR Apache-2.0",
   "repository": {

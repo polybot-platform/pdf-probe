@@ -1,0 +1,113 @@
+name: Native library
+
+# Builds the native library (ffi/, loaded with bun:ffi) for every platform worth shipping, runs the Rust tests on
+# each, and checks the library it built by loading it through bun:ffi, running the fixtures and comparing with
+# the pdf.js answers. The libraries are uploaded as artifacts, laid out like npm/native/ (<platform>-<arch>/).
+# Nothing is published from here: shipping them is the second half of issue #2.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux glibc is built inside a manylinux_2_28 container (glibc 2.28), because a library needs the glibc
+          # of the machine that built it: built on Ubuntu 24.04 it would refuse to load on Debian 11 or RHEL 8.
+          # Only the build and the Rust tests run in the container; the library is then tested on the runner.
+          - { name: linux-x64 (glibc 2.28),   dir: linux-x64,      lib: libpdf_probe_ffi.so,    os: ubuntu-24.04,     kind: docker, image: "quay.io/pypa/manylinux_2_28_x86_64",  glibc: "2.28" }
+          - { name: linux-arm64 (glibc 2.28), dir: linux-arm64,    lib: libpdf_probe_ffi.so,    os: ubuntu-24.04-arm, kind: docker, image: "quay.io/pypa/manylinux_2_28_aarch64", glibc: "2.28" }
+          # musl (Alpine): built and tested in Alpine, where the library has to load. See .cargo/config.toml.
+          - { name: linux-x64 (musl),         dir: linux-x64-musl, lib: libpdf_probe_ffi.so,    os: ubuntu-24.04,     kind: musl,   image: "rust:1-alpine" }
+          - { name: macos-arm64,              dir: darwin-arm64,   lib: libpdf_probe_ffi.dylib, os: macos-15,          kind: host }
+          - { name: macos-x64,                dir: darwin-x64,     lib: libpdf_probe_ffi.dylib, os: macos-15-intel,    kind: host }
+          - { name: windows-x64,              dir: win32-x64,      lib: pdf_probe_ffi.dll,      os: windows-2025,      kind: host }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Build and run the Rust tests ---------------------------------------------------------------------
+      - if: matrix.kind == 'host'
+        uses: dtolnay/rust-toolchain@stable
+      - if: matrix.kind == 'host'
+        uses: Swatinem/rust-cache@v2
+      - if: matrix.kind == 'host'
+        name: Rust tests and release build
+        run: |
+          cargo test -p pdf-probe -p pdf-probe-ffi --release --locked
+          cargo build --release -p pdf-probe-ffi --locked
+
+      - if: matrix.kind == 'docker'
+        name: Rust tests and release build (manylinux container)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src -e CARGO_TARGET_DIR=/src/target "${{ matrix.image }}" bash -euo pipefail -c '
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            ldd --version | sed -n 1p
+            cargo test -p pdf-probe -p pdf-probe-ffi --release --locked
+            cargo build --release -p pdf-probe-ffi --locked'
+
+      - if: matrix.kind == 'musl'
+        name: Rust tests and release build (Alpine container)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src -e CARGO_TARGET_DIR=/src/target "${{ matrix.image }}" sh -euc '
+            apk add --no-cache musl-dev
+            cargo test -p pdf-probe -p pdf-probe-ffi --release --locked
+            cargo build --release -p pdf-probe-ffi --locked'
+
+      # --- The library itself -------------------------------------------------------------------------------
+      # A musl build that can't make a cdylib only warns, so check that the file is really there.
+      - name: Collect the library
+        run: |
+          src="target/release/${{ matrix.lib }}"
+          [ -f "$src" ] || { echo "::error::$src was not built"; ls -la target/release; exit 1; }
+          mkdir -p "out/${{ matrix.dir }}"
+          cp "$src" "out/${{ matrix.dir }}/"
+          ls -la "out/${{ matrix.dir }}"
+      - if: matrix.glibc
+        name: Check the glibc the library needs
+        run: tools/check-glibc-floor.sh "out/${{ matrix.dir }}/${{ matrix.lib }}" "${{ matrix.glibc }}"
+
+      # --- Load it through bun:ffi and compare with pdf.js --------------------------------------------------
+      # The gs-* fixtures need Ghostscript 10.02, so they are left out here; the main CI runs all of them.
+      - if: matrix.kind != 'musl'
+        uses: oven-sh/setup-bun@v2
+      - if: matrix.kind != 'musl'
+        name: Fixtures through bun:ffi vs pdf.js
+        env:
+          PDF_PROBE_NATIVE_LIBRARY: ${{ github.workspace }}/out/${{ matrix.dir }}/${{ matrix.lib }}
+          SKIP_FIXTURES: gs-
+        run: |
+          bun run corpus
+          bun tools/run-native.ts corpus/out native-results.json
+          bun tools/diff-results.ts corpus/expected-pdfjs.json native-results.json
+      - if: matrix.kind == 'musl'
+        name: Fixtures through bun:ffi vs pdf.js (Alpine container)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src \
+            -e PDF_PROBE_NATIVE_LIBRARY="/src/out/${{ matrix.dir }}/${{ matrix.lib }}" -e SKIP_FIXTURES=gs- \
+            oven/bun:1-alpine sh -euc '
+              bun run corpus
+              bun tools/run-native.ts corpus/out native-results.json
+              bun tools/diff-results.ts corpus/expected-pdfjs.json native-results.json'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdf-probe-native-${{ matrix.dir }}
+          path: out/${{ matrix.dir }}
+          if-no-files-found: error
+          retention-days: 14

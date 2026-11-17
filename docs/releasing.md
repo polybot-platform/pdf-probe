@@ -34,7 +34,9 @@ because npm's spam filter rejected the name `pdf-probe-win32-x64`; see `npm/src/
 Publishing is irreversible: a version can be yanked or deprecated, never deleted or replaced. If the workflow
 fails after the tag is pushed, fix the problem, delete the tag (`git push origin :refs/tags/vX.Y.Z`) and tag
 again, as long as nothing reached crates.io or npm. The npm job skips a package whose version is already on npm,
-so re-running a job that failed part way is safe. The crates.io job is not repeatable: a crate version publishes
+so re-running a job that failed part way is safe. A re-run uses the code of the tagged commit, though: if the
+workflow or a script it runs is what failed, fixing it takes a new version (0.5.1's npm job failed on a path bug
+in `tools/publish-npm.sh`, which `tools/test-publish-npm.sh` now covers). The crates.io job is not repeatable: a crate version publishes
 once.
 
 ## What the workflow checks

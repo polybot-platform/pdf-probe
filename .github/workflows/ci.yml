@@ -70,6 +70,8 @@ jobs:
       - run: bun run npm:test
       # The packed packages, installed into an empty project: Bun finds the native library with no configuration.
       - run: bun run npm:install-test
+      # The release's npm publish script, against a stand-in npm: order, skipping, refusing, and the path it passes.
+      - run: tools/test-publish-npm.sh
       - name: Mutation fuzzer, 30 seconds (a smoke test; the long runs are local)
         run: cargo run --profile fuzz --example fuzz -- --seeds corpus/out --seconds 30 --rng 1
 

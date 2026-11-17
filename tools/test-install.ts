@@ -1,18 +1,28 @@
 // Installs the packed npm packages into an empty project, the way a user would, and checks that `createProbe()`
 // finds the native library with no configuration under Bun, and uses WebAssembly under Node.
-// Run after `bun run npm:build` (it needs npm/dist and the native library built on this machine):
-//   bun run tools/test-install.ts
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+//
+//   bun run tools/test-install.ts                         pack and install what this machine built: run it after
+//                                                          `bun run npm:build`
+//   bun tools/test-install.ts --tarballs <dir> [--expect <key>]   install the tarballs in <dir> (the npm-tarballs
+//                                                          artifact of native.yml) and check this machine is <key>
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { currentPlatformKey, packageName, PLATFORMS } from '../npm/src/platform.ts'
 
 const root = join(import.meta.dir, '..')
 const key = currentPlatformKey()
 if (!(key in PLATFORMS)) throw new Error(`no native package is shipped for ${key}`)
 
+const args = process.argv.slice(2)
+const option = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined)
+const tarballsDir = option('--tarballs')
+const expectedKey = option('--expect')
+if (expectedKey && key !== expectedKey) throw new Error(`this machine is ${key}, expected ${expectedKey}`)
+
 function run(cmd: string[], cwd: string): string {
-  const r = Bun.spawnSync(cmd, { cwd, stdout: 'pipe', stderr: 'pipe' })
+  // Bun.which finds npm.cmd on Windows, which spawning the bare name would not.
+  const r = Bun.spawnSync([Bun.which(cmd[0]!) ?? cmd[0]!, ...cmd.slice(1)], { cwd, stdout: 'pipe', stderr: 'pipe' })
   const out = `${r.stdout}${r.stderr}`
   if (r.exitCode !== 0) throw new Error(`${cmd.join(' ')} (in ${cwd}) exited ${r.exitCode}:\n${out}`)
   return out
@@ -20,12 +30,21 @@ function run(cmd: string[], cwd: string): string {
 
 const tmp = mkdtempSync(join(tmpdir(), 'pdf-probe-install-'))
 try {
-  const tarballs = join(tmp, 'tarballs')
-  mkdirSync(tarballs)
-  const platformDir = run(['bun', 'npm/native-packages.ts', '--local', join(tmp, 'native-packages')], root).trim()
-  const pack = (dir: string) => join(tarballs, run(['npm', 'pack', '--json', '--pack-destination', tarballs], dir).match(/"filename": "([^"]+)"/)![1]!)
-  const mainTarball = pack(join(root, 'npm'))
-  const platformTarball = pack(platformDir)
+  let mainTarball: string
+  let platformTarball: string
+  if (tarballsDir) {
+    const version = JSON.parse(readFileSync(join(root, 'npm/package.json'), 'utf8')).version
+    mainTarball = resolve(tarballsDir, `pdf-probe-${version}.tgz`)
+    platformTarball = resolve(tarballsDir, `${packageName(key)}-${version}.tgz`)
+    for (const f of [mainTarball, platformTarball]) if (!existsSync(f)) throw new Error(`${f} does not exist`)
+  } else {
+    const tarballs = join(tmp, 'tarballs')
+    mkdirSync(tarballs)
+    const platformDir = run(['bun', 'npm/native-packages.ts', '--local', join(tmp, 'native-packages')], root).trim()
+    const pack = (dir: string) => join(tarballs, run(['npm', 'pack', '--json', '--pack-destination', tarballs], dir).match(/"filename": "([^"]+)"/)![1]!)
+    mainTarball = pack(join(root, 'npm'))
+    platformTarball = pack(platformDir)
+  }
 
   const project = join(tmp, 'project')
   mkdirSync(project)

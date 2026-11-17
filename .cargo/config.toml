@@ -1,0 +1,12 @@
+# Settings that only the native library (ffi/, a cdylib) needs. They apply to builds made inside this repository.
+
+# musl links statically by default, and a static musl target cannot make a cdylib: cargo prints "dropping
+# unsupported crate type `cdylib`" and still succeeds, with no library built. Link the C library dynamically.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+# Link the C runtime into the DLL, so it loads on a Windows machine without the Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,7 +1,8 @@
+import { fileURLToPath } from 'node:url'
 // Differential gate: candidate must equal the pdf.js baseline on verdict, page count and every page size.
 // Fixtures listed in the optional intended-differences file must instead match the listed expectation, and
 // must NOT equal pdf.js (a stale entry is reported). Any other difference is a failure.
-const [baseF, candF, intendedF = new URL('../corpus/intended-differences.json', import.meta.url).pathname] = process.argv.slice(2)
+const [baseF, candF, intendedF = fileURLToPath(new URL('../corpus/intended-differences.json', import.meta.url))] = process.argv.slice(2)
 const base = await Bun.file(baseF).json(), cand = await Bun.file(candF).json()
 const intended = (await Bun.file(intendedF).exists()) ? await Bun.file(intendedF).json() : {}
 type R = { verdict: string | null; pages?: number; sizes?: number[][]; err?: string }
@@ -9,8 +10,12 @@ type R = { verdict: string | null; pages?: number; sizes?: number[][]; err?: str
 const FAILURES = new Set(['unparseable', 'empty'])
 const same = (b: R, c: R) =>
   b.verdict === c.verdict && (FAILURES.has(b.verdict as string) || (b.pages === c.pages && JSON.stringify(b.sizes) === JSON.stringify(c.sizes)))
-let ok = 0, allowed = 0; const diffs: string[] = []
+// SKIP_FIXTURES=gs-,foo- leaves out the baseline fixtures whose name starts with one of these prefixes. It is for
+// machines that can't make them (the gs-* ones need Ghostscript 10.02), and the skipped count is printed.
+const skip = (process.env.SKIP_FIXTURES ?? '').split(',').filter(Boolean)
+let ok = 0, allowed = 0, skipped = 0; const diffs: string[] = []
 for (const f of Object.keys(base)) {
+  if (skip.some((p) => f.startsWith(p))) { skipped++; continue }
   const b: R = base[f], c: R = cand[f] ?? { verdict: 'MISSING' }
   const want: R | undefined = intended[f]?.expected
   const show = `pdf.js=${b.verdict}/${b.pages ?? '-'} candidate=${c.verdict}/${c.pages ?? '-'} ${c.err ?? ''}`
@@ -21,6 +26,6 @@ for (const f of Object.keys(base)) {
   } else if (same(b, c)) ok++
   else diffs.push(`${f.padEnd(42)} ${show}`)
 }
-console.log(`${ok} identical, ${allowed} intended difference(s), ${diffs.length} unexpected, of ${Object.keys(base).length}`)
+console.log(`${ok} identical, ${allowed} intended difference(s), ${diffs.length} unexpected, of ${Object.keys(base).length}${skipped ? ` (${skipped} skipped)` : ''}`)
 diffs.forEach((d) => console.log('  DIFF', d))
 process.exit(diffs.length ? 1 : 0)

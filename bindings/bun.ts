@@ -1,6 +1,7 @@
 // Loads the pdf-probe shared library with bun:ffi. A thin wrapper over one C function: see ffi/src/lib.rs
 // for the result layout. `bun:ffi` is imported lazily so that this file can be bundled into a package that
 // also runs under Node, where the native engine is simply never loaded.
+import { fileURLToPath } from 'node:url'
 import { ABI_VERSION, bufferSizeFor, decodeResult, HEADER, type ProbeResult } from './result.ts'
 
 export type { PageSize, ProbeResult } from './result.ts'
@@ -12,7 +13,7 @@ export async function libraryFileName(): Promise<string> {
 }
 
 export async function defaultLibraryPath(): Promise<string> {
-  return new URL(`../target/release/${await libraryFileName()}`, import.meta.url).pathname
+  return fileURLToPath(new URL(`../target/release/${await libraryFileName()}`, import.meta.url))
 }
 
 export async function loadPdfProbe(path?: string) {

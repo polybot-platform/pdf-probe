@@ -6,7 +6,8 @@ import { loadPdfProbe } from '../bindings/bun.ts'
 
 const MAX = { long: 17.5, short: 12 } // the example policy of the other runners, not part of the library
 const round3 = (x: number) => Math.round(x * 1000) / 1000
-const probe = await loadPdfProbe()
+// PDF_PROBE_NATIVE_LIBRARY: the library to test (the one the CI matrix built); default target/release.
+const probe = await loadPdfProbe(process.env.PDF_PROBE_NATIVE_LIBRARY)
 const dir = process.argv[2]
 const out: Record<string, unknown> = {}
 for (const f of readdirSync(dir).filter((x) => x.endsWith('.pdf')).sort()) {

@@ -7,8 +7,9 @@ token to store, rotate or leak, and the npm packages carry a provenance statemen
 that built them.
 
 The npm packages are `pdf-probe` (WebAssembly and the loader) and one package per platform that holds the native
-library: `pdf-probe-linux-x64`, `-linux-arm64`, `-linux-x64-musl`, `-darwin-arm64`, `-darwin-x64` and
-`-win32-x64`. `pdf-probe` lists them as optional dependencies at its own version.
+library: `pdf-probe-linux-x64`, `-linux-arm64`, `-linux-x64-musl`, `-darwin-arm64` and `-darwin-x64`. `pdf-probe`
+lists them as optional dependencies at its own version. Windows is built and tested in CI but has no package yet,
+because npm's spam filter rejected the name `pdf-probe-win32-x64`; see `npm/src/platform.ts` for how to add it back.
 
 ## Cutting a release
 
@@ -62,31 +63,20 @@ expire within days and revoke it afterwards.
 The `release` environment (repository *Settings → Environments*) lists the required reviewers and only accepts
 deployments from `v*` tags.
 
-### npm (to do, before the first release that ships the platform packages)
+### npm
 
 npm trusted publishing is set up per package, in the package's *Settings → Trusted Publisher* on npmjs.com, or
-with `npm trust github` (npm 11.15 or later; the first request asks for two-factor authentication). Each package
-gets the same entry: GitHub Actions, repository `polybot-platform/pdf-probe`, workflow filename `release.yml`
-(the file name alone), environment `release`.
+with `npm trust github` (npm 11.15 or later; the first request asks for two-factor authentication). Each of the
+six packages (`pdf-probe` and the five platform packages) gets the same entry: GitHub Actions, repository
+`polybot-platform/pdf-probe`, workflow filename `release.yml` (the file name alone), environment `release`, and
+only **Allow `npm publish`** checked (the workflow does not touch dist-tags).
 
-- `pdf-probe` exists, so it can be configured now.
-- **A package must exist before it can be configured**, so the six platform packages need a first publish by
-  hand. The workflow cannot do it.
-- **A new configuration expires if no publish uses it within 2 days.** Configure a package shortly before the
-  release that uses it.
-
-The first release with the platform packages (0.5.0) goes like this:
-
-1. Tag, as above. Wait for the workflow to finish `native` and for the two publish jobs to be waiting for approval.
-2. Download the `npm-tarballs` artifact from the run, and publish the six platform tarballs by hand with your own
-   npm login (`npm publish <file>.tgz --access public`). They are the files that passed the install test on
-   every platform. They have no provenance statement, because they are not published from a workflow.
-3. Configure trusted publishing for `pdf-probe` (and, if you want to, the six platform packages, though they
-   are not published by this run and so would have to be used by a release within 2 days).
-4. Approve the publish jobs. The npm job skips the six platform packages (already on npm) and publishes `pdf-probe`
-   with provenance.
-
-From the next release on, once every package has a trusted publisher, the workflow publishes all seven.
+- **A package must exist before it can be configured.** The six exist (the five platform packages were published
+  by hand at 0.5.0, the first release that had them). A package added later, Windows for one, needs the same: a
+  first publish by hand from the `npm-tarballs` artifact of a release run, before approving it.
+- **A new configuration expires if no publish uses it within 2 days.** Configure the packages shortly before the
+  release that uses them.
+- npm shows a `0.0.0-stage` version on a new package. It is npm's own and harmless; `latest` is the real version.
 
 Optionally, in each package's settings, set publishing access to *Require two-factor authentication and disallow
 tokens*, so that only trusted publishing (and a person with two-factor authentication) can publish.

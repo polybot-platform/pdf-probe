@@ -71,11 +71,11 @@ dependencies = [
 
 [[package]]
 name = "pdf-probe"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "pdf-probe-ffi"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "pdf-probe",
 ]

@@ -46,12 +46,10 @@ fn main() {
     let file = build(pages, elements);
     // Pass a third argument (a budget in units) to see the budget stop it; by default it is off here.
     let max_work = args.get(2).map_or(u64::MAX, |w| *w as u64);
-    let limits = Limits {
-        max_pages: 1_000_000,
-        max_work,
-        max_values: usize::MAX,
-        ..Limits::default()
-    };
+    let limits = Limits::default()
+        .max_pages(1_000_000)
+        .max_work(max_work)
+        .max_values(usize::MAX);
     let t = Instant::now();
     let result = probe(&file, &limits);
     let ms = t.elapsed().as_secs_f64() * 1000.0;

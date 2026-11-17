@@ -109,6 +109,8 @@ pub fn encode(outcome: std::thread::Result<Result<Probe, Failure>>) -> Vec<u8> {
         Ok(Err(Failure::LimitExceeded(limit))) => {
             with_reason(STATUS_LIMIT_EXCEEDED, 0, limit.name())
         }
+        // A failure kind this build doesn't know: no answer, so report it as unparseable rather than guess.
+        Ok(Err(_)) => with_reason(STATUS_UNPARSEABLE, 0, "unrecognised failure"),
         Err(payload) => {
             let msg = payload
                 .downcast_ref::<&str>()
@@ -123,21 +125,13 @@ pub fn encode(outcome: std::thread::Result<Result<Probe, Failure>>) -> Vec<u8> {
 /// Runs the parser on `data` and returns the encoded answer. Never panics. A `max_input_bytes` or
 /// `max_work_millions` of 0 means the library's default.
 pub fn check(data: &[u8], max_pages: u32, max_input_bytes: u32, max_work_millions: u32) -> Vec<u8> {
-    let defaults = Limits::default();
-    let limits = Limits {
-        max_pages: max_pages.min(MAX_PAGES_CEILING) as usize,
-        max_input_bytes: if max_input_bytes == 0 {
-            defaults.max_input_bytes
-        } else {
-            max_input_bytes as usize
-        },
-        max_work: if max_work_millions == 0 {
-            defaults.max_work
-        } else {
-            u64::from(max_work_millions) * 1_000_000
-        },
-        ..defaults
-    };
+    let mut limits = Limits::default().max_pages(max_pages.min(MAX_PAGES_CEILING) as usize);
+    if max_input_bytes != 0 {
+        limits = limits.max_input_bytes(max_input_bytes as usize);
+    }
+    if max_work_millions != 0 {
+        limits = limits.max_work(u64::from(max_work_millions) * 1_000_000);
+    }
     encode(catch_unwind(AssertUnwindSafe(|| probe(data, &limits))))
 }
 

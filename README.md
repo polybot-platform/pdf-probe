@@ -1,5 +1,7 @@
 # pdf-probe
 
+[![crates.io](https://img.shields.io/crates/v/pdf-probe.svg)](https://crates.io/crates/pdf-probe) [![docs.rs](https://docs.rs/pdf-probe/badge.svg)](https://docs.rs/pdf-probe) [![npm](https://img.shields.io/npm/v/pdf-probe.svg)](https://www.npmjs.com/package/pdf-probe)
+
 A small, fail-closed reader for untrusted PDFs. Given the bytes of a PDF and a page cap, it returns:
 
 - **Page count** (`pages`)
@@ -43,10 +45,7 @@ switch (result.status) {
 ```rust
 use pdf_probe::{Limits, probe};
 
-let result = probe(&bytes, &Limits {
-    max_pages: 200,
-    ..Limits::default()
-});
+let result = probe(&bytes, &Limits::default().max_pages(200));
 ```
 
 ---
@@ -77,7 +76,7 @@ Because the input is hostile, every loop and allocation is bounded. Hitting a re
 | Work budget | `2^30` units (~1.07B) | `max_work` / `maxWork` | `work` |
 | Page cap | 10,000 | `max_pages` / `maxPages` | returns `TooManyPages` / `tooManyPages` |
 | Objects, xref sections, inflated bytes | 1,000,000 / 256 / 64 MiB | Rust `Limits` struct | `objects`, `xrefSections`, `decompressed` |
-| Parsed values alive at once (bounds memory) | 1,000,000 | Rust `Limits` struct (`max_values`) | `values` |
+| Parsed values alive at once (bounds memory) | 1,000,000 | Rust `Limits::max_values` | `values` |
 
 Nesting depth (arrays/dictionaries) and page-tree depth are fixed at 64.
 

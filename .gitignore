@@ -1,3 +1,8 @@
+# Local secrets (a crates.io token, say) never belong in the repository.
+.env
+.env.*
+.mcp.json
+
 node_modules/
 corpus/out/
 corpus/reference-results.json

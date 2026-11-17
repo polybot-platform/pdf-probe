@@ -11,13 +11,11 @@ use libfuzzer_sys::fuzz_target;
 use pdf_probe::{Limits, probe};
 
 fuzz_target!(|data: &[u8]| {
-    let limits = Limits {
-        max_pages: 1000,
-        max_objects: 200_000,
-        max_xref_sections: 64,
-        max_decompressed: 8 << 20,
-        ..Limits::default()
-    };
+    let limits = Limits::default()
+        .max_pages(1000)
+        .max_objects(200_000)
+        .max_xref_sections(64)
+        .max_decompressed(8 << 20);
     if let Ok(p) = probe(data, &limits) {
         assert!(p.pages > 0 && p.pages == p.sizes.len() && p.pages <= limits.max_pages);
         assert!(p.work > 0 && p.work <= limits.max_work);

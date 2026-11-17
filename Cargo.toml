@@ -5,8 +5,13 @@ edition = "2024"
 description = "A small, fail-closed reader that answers two questions about an untrusted PDF: how many pages, and how big is each page."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/polybot-platform/pdf-probe"
-# Not published yet. The crates.io name is reserved separately; see the project issue.
-publish = false
+readme = "README.md"
+# Edition 2024 needs 1.85, and the parser uses `let` chains, which are stable from 1.88.
+rust-version = "1.88"
+keywords = ["pdf", "page-count", "page-size", "untrusted-input", "no-dependencies"]
+categories = ["parser-implementations", "web-programming"]
+# Only the library ships. ffi/, fuzz/, examples/, bindings/, npm/, corpus/ and the tooling stay in the repository.
+include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [workspace]
 members = ["ffi"]

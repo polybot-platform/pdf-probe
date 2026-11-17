@@ -25,7 +25,18 @@ use xref::{Entry, Xref};
 
 /// Limits on the work one call may do. The input is hostile, so every loop in the library is bounded by one
 /// of these, and a limit that is hit is reported as [`Failure::LimitExceeded`] naming which one.
+///
+/// More limits may be added, so the struct is `#[non_exhaustive]`: outside this crate it can't be written as
+/// a struct literal. Start from [`Limits::default()`] and change what you need with the setters, or assign to
+/// the fields of a `mut` value:
+///
+/// ```
+/// use pdf_probe::Limits;
+/// let limits = Limits::default().max_pages(200).max_input_bytes(5 << 20);
+/// assert_eq!(limits.max_pages, 200);
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Limits {
     /// More pages than this is reported as [`Failure::TooManyPages`].
     pub max_pages: usize,
@@ -51,6 +62,57 @@ pub struct Limits {
     /// of them, so a long document does not add up against this; real files keep at most a few tens of
     /// thousands alive.
     pub max_values: usize,
+}
+
+impl Limits {
+    /// Sets [`max_pages`](Self::max_pages).
+    #[must_use]
+    pub fn max_pages(mut self, max_pages: usize) -> Limits {
+        self.max_pages = max_pages;
+        self
+    }
+
+    /// Sets [`max_input_bytes`](Self::max_input_bytes).
+    #[must_use]
+    pub fn max_input_bytes(mut self, max_input_bytes: usize) -> Limits {
+        self.max_input_bytes = max_input_bytes;
+        self
+    }
+
+    /// Sets [`max_work`](Self::max_work).
+    #[must_use]
+    pub fn max_work(mut self, max_work: u64) -> Limits {
+        self.max_work = max_work;
+        self
+    }
+
+    /// Sets [`max_objects`](Self::max_objects).
+    #[must_use]
+    pub fn max_objects(mut self, max_objects: usize) -> Limits {
+        self.max_objects = max_objects;
+        self
+    }
+
+    /// Sets [`max_xref_sections`](Self::max_xref_sections).
+    #[must_use]
+    pub fn max_xref_sections(mut self, max_xref_sections: usize) -> Limits {
+        self.max_xref_sections = max_xref_sections;
+        self
+    }
+
+    /// Sets [`max_decompressed`](Self::max_decompressed).
+    #[must_use]
+    pub fn max_decompressed(mut self, max_decompressed: usize) -> Limits {
+        self.max_decompressed = max_decompressed;
+        self
+    }
+
+    /// Sets [`max_values`](Self::max_values).
+    #[must_use]
+    pub fn max_values(mut self, max_values: usize) -> Limits {
+        self.max_values = max_values;
+        self
+    }
 }
 
 impl Default for Limits {
@@ -127,8 +189,10 @@ pub struct Probe {
     pub cropped: bool,
 }
 
-/// Why no answer was given. The input is never guessed at.
+/// Why no answer was given. The input is never guessed at. More kinds may be added, so a `match` outside this
+/// crate needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Failure {
     /// Damaged, unsupported, or encrypted with a password. The text says which.
     Unparseable(&'static str),
@@ -1048,6 +1112,30 @@ mod tests {
             probe(&modern_pdf(), &limits),
             Err(Failure::LimitExceeded(Limit::Decompressed))
         );
+    }
+
+    #[test]
+    fn limit_setters_set_their_field_and_leave_the_rest() {
+        let d = Limits::default();
+        let l = Limits::default()
+            .max_pages(1)
+            .max_input_bytes(2)
+            .max_work(3)
+            .max_objects(4)
+            .max_xref_sections(5)
+            .max_decompressed(6)
+            .max_values(7);
+        assert_eq!(
+            (l.max_pages, l.max_input_bytes, l.max_work, l.max_objects),
+            (1, 2, 3, 4)
+        );
+        assert_eq!(
+            (l.max_xref_sections, l.max_decompressed, l.max_values),
+            (5, 6, 7)
+        );
+        let only = Limits::default().max_pages(9);
+        assert_eq!(only.max_input_bytes, d.max_input_bytes);
+        assert_eq!(only.max_values, d.max_values);
     }
 
     #[test]

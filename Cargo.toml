@@ -24,7 +24,7 @@ exclude = ["fuzz"]
 # FOR TESTS ONLY, never in a build you ship: parsing the name /PdfProbeForcePanic as a value panics. It lets the
 # tests of the native library and the wasm module check what a real panic in the parser does to the host. Build
 # it in its own target directory (CARGO_TARGET_DIR=target/force-panic) so it can't replace a normal build.
-force-panic = []
+_force-panic = []
 
 [lints.rust]
 unsafe_code = "forbid"

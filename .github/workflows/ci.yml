@@ -39,12 +39,12 @@ jobs:
       - run: cargo test --workspace --release
       # The tests that force a real panic in the parser. The test-only feature is built in its own target
       # directory, so it can't replace the normal build.
-      - name: Forced-panic tests (force-panic feature)
+      - name: Forced-panic tests (_force-panic feature)
         env:
           CARGO_TARGET_DIR: target/force-panic
         run: |
-          cargo clippy -p pdf-probe -p pdf-probe-ffi --all-targets --release --features force-panic -- -D warnings
-          cargo test -p pdf-probe -p pdf-probe-ffi --release --features force-panic
+          cargo clippy -p pdf-probe -p pdf-probe-ffi --all-targets --release --features _force-panic -- -D warnings
+          cargo test -p pdf-probe -p pdf-probe-ffi --release --features _force-panic
 
   # The differential test: the same page counts, sizes and verdicts as pdf.js on the generated fixtures, then
   # the same through the native library, the wasm module and the npm package, on Node and Bun.

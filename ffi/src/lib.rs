@@ -370,7 +370,7 @@ mod tests {
 
     /// A one-page file with a correct cross-reference table. The page inherits `/MediaBox 3 0 R`, an array of
     /// `items` zeros followed by `tail`. The box is not a valid one, so the page gets the default size.
-    #[cfg(feature = "force-panic")]
+    #[cfg(feature = "_force-panic")]
     fn big_box(items: usize, tail: &str) -> Vec<u8> {
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -401,9 +401,9 @@ mod tests {
         out
     }
 
-    /// Needs the test-only `force-panic` feature, in its own target directory:
-    /// `CARGO_TARGET_DIR=target/force-panic cargo test --release -p pdf-probe-ffi --features force-panic`.
-    #[cfg(feature = "force-panic")]
+    /// Needs the test-only `_force-panic` feature, in its own target directory:
+    /// `CARGO_TARGET_DIR=target/force-panic cargo test --release -p pdf-probe-ffi --features _force-panic`.
+    #[cfg(feature = "_force-panic")]
     #[test]
     #[allow(unsafe_code)]
     fn a_real_panic_in_the_parser_is_a_status_and_the_next_calls_are_unaffected() {

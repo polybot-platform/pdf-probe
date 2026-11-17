@@ -138,10 +138,10 @@ bun run npm:build && bun run npm:test   # build Wasm + native + npm bundle and r
 
 ### Forced-panic tests
 
-No real input is known to panic the parser, so a test-only Cargo feature, `force-panic`, makes it panic on the name `/PdfProbeForcePanic` partway through parsing. The tests check that the panic gives back the parsed items it was holding, that the native `pdf_probe_check` returns the `panic` status, and that a wasm trap is reported as `panic` with a fresh instance replacing the old one. After either, later calls give the same answers as before. The feature is built in its own target directory so it can't replace a normal build. The tests also check that the shipped builds don't have it.
+No real input is known to panic the parser, so a test-only Cargo feature, `_force-panic`, makes it panic on the name `/PdfProbeForcePanic` partway through parsing. The tests check that the panic gives back the parsed items it was holding, that the native `pdf_probe_check` returns the `panic` status, and that a wasm trap is reported as `panic` with a fresh instance replacing the old one. After either, later calls give the same answers as before. The feature is built in its own target directory so it can't replace a normal build. The tests also check that the shipped builds don't have it.
 
 ```bash
-CARGO_TARGET_DIR=target/force-panic cargo test --release -p pdf-probe -p pdf-probe-ffi --features force-panic
+CARGO_TARGET_DIR=target/force-panic cargo test --release -p pdf-probe -p pdf-probe-ffi --features _force-panic
 bun run panic:build                     # the panic builds that npm:test and bindings/wasm.test.ts load (npm:test runs it)
 ```
 

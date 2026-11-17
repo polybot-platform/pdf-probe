@@ -2,12 +2,15 @@ name: Native library
 
 # Builds the native library (ffi/, loaded with bun:ffi) for every platform worth shipping, runs the Rust tests on
 # each, and checks the library it built by loading it through bun:ffi, running the fixtures and comparing with
-# the pdf.js answers. The libraries are uploaded as artifacts, laid out like npm/native/ (<platform>-<arch>/).
-# Nothing is published from here: shipping them is the second half of issue #2.
+# the pdf.js answers. The libraries are uploaded as artifacts (pdf-probe-native-<platform>-<arch>[-musl]).
+# Then they are wrapped into the npm packages, and those are installed on every platform, as a user would.
+# Nothing is published from here. release.yml calls this workflow on a version tag and publishes the tarballs
+# it makes, so the actions here are pinned to commits, like the ones in release.yml.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -38,13 +41,17 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       # --- Build and run the Rust tests ---------------------------------------------------------------------
       - if: matrix.kind == 'host'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
       - if: matrix.kind == 'host'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: matrix.kind == 'host'
         name: Rust tests and release build
         run: |
@@ -85,7 +92,7 @@ jobs:
       # --- Load it through bun:ffi and compare with pdf.js --------------------------------------------------
       # The gs-* fixtures need Ghostscript 10.02, so they are left out here; the main CI runs all of them.
       - if: matrix.kind != 'musl'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - if: matrix.kind != 'musl'
         name: Fixtures through bun:ffi vs pdf.js
         env:
@@ -105,9 +112,96 @@ jobs:
               bun tools/run-native.ts corpus/out native-results.json
               bun tools/diff-results.ts corpus/expected-pdfjs.json native-results.json'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pdf-probe-native-${{ matrix.dir }}
           path: out/${{ matrix.dir }}
           if-no-files-found: error
           retention-days: 14
+
+  # The npm packages, as the tarballs `npm publish` would upload: one per platform around the library built above,
+  # and pdf-probe itself. They are installed on every platform below, and release.yml publishes these very files.
+  pack:
+    name: Pack the npm packages
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # wasm-opt (binaryen) makes the module about 12% smaller; npm/build.ts uses it when it is installed.
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pdf-probe-native-*
+          path: libs # libs/pdf-probe-native-<key>/<library file>
+      - name: Build the packages
+        run: |
+          set -euo pipefail
+          bun npm/build.ts | tee build.log
+          grep -q 'wasm-opt -Oz' build.log || { echo "::error::the wasm module was not optimised"; exit 1; }
+          bun npm/native-packages.ts libs npm/native-packages
+          mkdir tarballs
+          for dir in npm/native-packages/*/; do (cd "$dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs"); done
+          (cd npm && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs")
+          ls -l tarballs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-tarballs
+          path: tarballs
+          if-no-files-found: error
+          retention-days: 14
+
+  # Installs the tarballs into an empty project on each platform and checks that createProbe() finds the native
+  # library with no configuration under Bun, and uses WebAssembly under Node (tools/test-install.ts).
+  install:
+    name: install on ${{ matrix.name }}
+    needs: pack
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64,       os: ubuntu-24.04,     kind: host }
+          - { name: linux-arm64,     os: ubuntu-24.04-arm, kind: host }
+          - { name: linux-x64-musl,  os: ubuntu-24.04,     kind: musl }
+          - { name: darwin-arm64,    os: macos-15,         kind: host }
+          - { name: darwin-x64,      os: macos-15-intel,   kind: host }
+          - { name: win32-x64,       os: windows-2025,     kind: host }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-tarballs
+          path: tarballs
+      - if: matrix.kind == 'host'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - if: matrix.kind == 'host'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - if: matrix.kind == 'host'
+        name: Install the packages and load them
+        run: bun tools/test-install.ts --tarballs tarballs --expect ${{ matrix.name }}
+      - if: matrix.kind == 'musl'
+        name: Install the packages and load them (Alpine container)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src oven/bun:1-alpine sh -euc '
+            apk add --no-cache nodejs npm
+            bun tools/test-install.ts --tarballs tarballs --expect ${{ matrix.name }}'

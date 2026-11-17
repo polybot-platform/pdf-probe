@@ -23,3 +23,4 @@ npm/LICENSE-MIT
 npm/LICENSE-APACHE
 .idea/
 bench/bench-results.json
+npm/native-packages/

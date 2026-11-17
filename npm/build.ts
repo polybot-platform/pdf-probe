@@ -2,6 +2,7 @@
 // JavaScript, the declarations, and the licences. Usage (from the repo root): bun run npm:build
 import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { currentPlatformKey } from './src/platform.ts'
 
 const here = import.meta.dir
 const root = join(here, '..')
@@ -40,13 +41,14 @@ if (wasmOpt) {
 if (!optimised) copyFileSync(rawWasm, shippedWasm)
 console.log(`wasm: ${Bun.file(shippedWasm).size} bytes (${optimised ? 'wasm-opt -Oz' : 'not optimised: wasm-opt not found or failed'})`)
 
-// The native library is built for this machine only. A release needs one per platform, from CI.
+// The native library is built for this machine only, for development: npm/native/ is not published. The libraries
+// that ship are built by CI, one package per platform: see native-packages.ts.
 if (cargo(['build', '--release', '-p', 'pdf-probe-ffi'], false)) {
   const suffix = process.platform === 'darwin' ? 'dylib' : process.platform === 'win32' ? 'dll' : 'so'
   const file = `${process.platform === 'win32' ? '' : 'lib'}pdf_probe_ffi.${suffix}`
   const built = join(root, 'target/release', file)
   if (existsSync(built)) {
-    const dir = join(here, 'native', `${process.platform}-${process.arch}`)
+    const dir = join(here, 'native', currentPlatformKey())
     mkdirSync(dir, { recursive: true })
     copyFileSync(built, join(dir, file))
   }

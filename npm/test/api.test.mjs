@@ -14,7 +14,9 @@ const wasmPath = fileURLToPath(new URL('../dist/pdf_probe.wasm', import.meta.url
 // The native library's file name, as Cargo names it (and npm/build.ts copies it) on this platform.
 const nativeFile =
   process.platform === 'win32' ? 'pdf_probe_ffi.dll' : `libpdf_probe_ffi.${process.platform === 'darwin' ? 'dylib' : 'so'}`
-const nativePath = fileURLToPath(new URL(`../native/${process.platform}-${process.arch}/${nativeFile}`, import.meta.url))
+// ...in the directory npm/build.ts names: <platform>-<arch>, and -musl on Alpine.
+const musl = process.platform === 'linux' && !process.report?.getReport?.().header?.glibcVersionRuntime
+const nativePath = fileURLToPath(new URL(`../native/${process.platform}-${process.arch}${musl ? '-musl' : ''}/${nativeFile}`, import.meta.url))
 const hasNative = isBun && existsSync(nativePath)
 
 test('reads the page count and sizes (wasm)', async () => {

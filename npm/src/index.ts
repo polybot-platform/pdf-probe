@@ -1,10 +1,13 @@
 // pdf-probe: the page count and every page's size of an untrusted PDF, or a failure. One API over two engines:
 // the native shared library (Bun only, through bun:ffi) and WebAssembly (everywhere else). Both give the same
 // answers, byte for byte, on the whole test corpus.
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { libraryFileName, loadPdfProbe as loadNative } from '../../bindings/bun.ts'
 import type { ProbeResult } from '../../bindings/result.ts'
 import { loadPdfProbeWasm } from '../../bindings/wasm.ts'
+import { currentPlatformKey, packageName, PLATFORMS } from './platform.ts'
 
 export type { LimitName, PageSize, ProbeResult } from '../../bindings/result.ts'
 
@@ -13,7 +16,10 @@ export type Engine = 'auto' | 'native' | 'wasm'
 
 export interface CreateOptions {
   engine?: Engine
-  /** A path to the native shared library. Default: `PDF_PROBE_NATIVE_LIBRARY`, then the package's own `native/`. */
+  /**
+   * A path to the native shared library. Default: `PDF_PROBE_NATIVE_LIBRARY`, then the library of the installed
+   * `pdf-probe-<platform>` package for this machine.
+   */
   nativeLibrary?: string
   /** The WebAssembly module: bytes, a compiled module, a URL or a path. Default: the file shipped in the package. */
   wasm?: BufferSource | WebAssembly.Module | URL | string
@@ -99,12 +105,26 @@ function wrap(engine: 'native' | 'wasm', run: Run, release: () => void): Probe {
   }
 }
 
-async function findNativeLibrary(explicit?: string): Promise<string | undefined> {
+/** The library inside the installed `pdf-probe-<key>` package, if npm installed it for this machine. */
+function installedLibrary(key: string): string | undefined {
+  const platform = PLATFORMS[key]
+  if (!platform) return undefined
+  try {
+    const manifest = createRequire(import.meta.url).resolve(`${packageName(key)}/package.json`)
+    return join(dirname(manifest), platform.file)
+  } catch {
+    return undefined
+  }
+}
+
+async function findNativeLibrary(key: string, explicit?: string): Promise<string | undefined> {
   const bun = (globalThis as { Bun?: { file(p: string): { exists(): Promise<boolean> } } }).Bun
   const candidates = [
     explicit,
     process.env.PDF_PROBE_NATIVE_LIBRARY,
-    fileURLToPath(new URL(`../native/${process.platform}-${process.arch}/${await libraryFileName()}`, import.meta.url)),
+    // A library built in a checkout of the repository by `bun run npm:build`.
+    fileURLToPath(new URL(`../native/${key}/${await libraryFileName()}`, import.meta.url)),
+    installedLibrary(key),
   ]
   for (const path of candidates) {
     if (path && (await bun?.file(path).exists())) return path
@@ -143,7 +163,8 @@ export async function createProbe(options: CreateOptions = {}): Promise<Probe> {
     if (!isBun()) {
       if (engine === 'native') throw new Error("the 'native' engine needs Bun (it loads the library with bun:ffi)")
     } else {
-      const path = await findNativeLibrary(options.nativeLibrary)
+      const key = currentPlatformKey()
+      const path = await findNativeLibrary(key, options.nativeLibrary)
       if (path) {
         try {
           const lib = await loadNative(path)
@@ -153,7 +174,11 @@ export async function createProbe(options: CreateOptions = {}): Promise<Probe> {
         }
       } else if (engine === 'native') {
         throw new Error(
-          `no native library for ${process.platform}-${process.arch}: set nativeLibrary or PDF_PROBE_NATIVE_LIBRARY`,
+          key in PLATFORMS
+            ? `no native library for ${key}: install ${packageName(key)} (it is an optional dependency of pdf-probe, ` +
+                'skipped by --omit=optional), or set nativeLibrary or PDF_PROBE_NATIVE_LIBRARY'
+            : `pdf-probe has no native library for ${key} (it has ${Object.keys(PLATFORMS).join(', ')}): ` +
+                'use the wasm engine, or set nativeLibrary or PDF_PROBE_NATIVE_LIBRARY',
         )
       }
     }

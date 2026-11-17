@@ -1,0 +1,59 @@
+name: Release
+
+# Publishes the crate to crates.io when a version tag is pushed (git tag v0.5.0 && git push origin v0.5.0).
+# There is no API token: crates.io trusts this workflow (a "trusted publisher" in the crate's settings) and hands
+# it a token that lives for this run only. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify the tag and the package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Actions here are pinned to a commit, not a tag: this workflow publishes.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0 # the check needs origin/main to see that the tag is on it
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - name: Check the tag against Cargo.toml and main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: tools/check-release.sh "$TAG"
+      - run: cargo test -p pdf-probe --locked --release
+      - run: cargo publish --dry-run -p pdf-probe --locked
+
+  publish:
+    name: Publish to crates.io
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The environment holds the approval step: the job waits here for a reviewer. It is also the name given to
+    # crates.io, which only accepts a token request that comes from this environment.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # lets the job prove its identity to crates.io (OIDC); only this job gets it
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      - run: cargo publish -p pdf-probe --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

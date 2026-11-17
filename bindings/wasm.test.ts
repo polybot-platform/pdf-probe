@@ -188,7 +188,7 @@ test('a growing input gets a buffer sized to fit, not doubled', () => {
 })
 
 test('a real panic inside the module is a trap: reported as panic, and the instance is replaced', () => {
-  // Built with the test-only force-panic feature by `bun run panic:build`.
+  // Built with the test-only _force-panic feature by `bun run panic:build`.
   const path = new URL('../target/force-panic/wasm32-unknown-unknown/wasm/pdf_probe_ffi.wasm', import.meta.url)
   const probe = loadPdfProbeWasm(readFileSync(path))
   const expected = probe.check(pdf, 10)

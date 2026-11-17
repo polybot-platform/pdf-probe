@@ -715,9 +715,9 @@ mod tests {
         assert_eq!((repaired.pages, repaired.repaired), (300, true));
     }
 
-    /// Needs the test-only `force-panic` feature: `cargo test --features force-panic` (in its own target
+    /// Needs the test-only `_force-panic` feature: `cargo test --features _force-panic` (in its own target
     /// directory, as in Cargo.toml).
-    #[cfg(feature = "force-panic")]
+    #[cfg(feature = "_force-panic")]
     #[test]
     fn a_panic_while_parsing_gives_back_the_items_it_had_parsed() {
         // The page inherits a box that panics after 50,000 items; the root and pages tree are parsed and

@@ -14,13 +14,16 @@ export interface Platform {
   file: string
 }
 
+// Windows (win32-x64, file pdf_probe_ffi.dll) is built and tested in CI but not shipped yet: npm's spam filter
+// rejected the package name pdf-probe-win32-x64 (E403, November 2026). Until it ships, Windows uses WebAssembly.
+// To add it back: an entry here, its optionalDependencies entry, `ship: true` on its native.yml row and its
+// install row, and a first publish by hand (a package must exist before npm can trust a workflow for it).
 export const PLATFORMS: Readonly<Record<string, Platform>> = {
   'linux-x64': { os: 'linux', cpu: 'x64', libc: 'glibc', file: 'libpdf_probe_ffi.so' },
   'linux-arm64': { os: 'linux', cpu: 'arm64', libc: 'glibc', file: 'libpdf_probe_ffi.so' },
   'linux-x64-musl': { os: 'linux', cpu: 'x64', libc: 'musl', file: 'libpdf_probe_ffi.so' },
   'darwin-arm64': { os: 'darwin', cpu: 'arm64', file: 'libpdf_probe_ffi.dylib' },
   'darwin-x64': { os: 'darwin', cpu: 'x64', file: 'libpdf_probe_ffi.dylib' },
-  'win32-x64': { os: 'win32', cpu: 'x64', file: 'pdf_probe_ffi.dll' },
 }
 
 /** The key of a machine: `<platform>-<arch>`, with `-musl` on Linux when the C library is musl. */

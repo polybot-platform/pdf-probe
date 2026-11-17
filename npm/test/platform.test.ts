@@ -30,10 +30,12 @@ test('pdf-probe depends on exactly the platform packages, at its own version', (
   expect(main.optionalDependencies).toEqual(expected)
 })
 
-test('the CI matrix builds exactly the platforms in the table, with the same library file names', () => {
-  const rows = [...read('.github/workflows/native.yml').matchAll(/dir: (\S+?),\s+lib: (\S+?),/g)]
-  expect(rows.map((r) => r[1]).sort()).toEqual(Object.keys(PLATFORMS).sort())
-  for (const [, dir, lib] of rows) expect(lib).toBe(PLATFORMS[dir!]!.file)
+test('the CI matrix ships exactly the platforms in the table, with the same library file names', () => {
+  const rows = [...read('.github/workflows/native.yml').matchAll(/dir: (\S+?),\s+lib: (\S+?),.*?ship: (true|false)/g)]
+  expect(rows.length).toBeGreaterThan(0)
+  const shipped = rows.filter((r) => r[3] === 'true')
+  expect(shipped.map((r) => r[1]).sort()).toEqual(Object.keys(PLATFORMS).sort())
+  for (const [, dir, lib] of shipped) expect(lib).toBe(PLATFORMS[dir!]!.file)
 })
 
 test('a platform package holds the library and says which machines may install it', () => {
@@ -56,9 +58,9 @@ test('a platform package holds the library and says which machines may install i
     // No `exports`, so the loader can resolve <name>/package.json to find the directory.
     expect(manifest.exports).toBeUndefined()
 
-    const win = JSON.parse(readFileSync(join(buildPlatformPackage('win32-x64', lib, join(tmp, 'out')), 'package.json'), 'utf8'))
-    expect(win.libc).toBeUndefined()
-    expect(win.files[0]).toBe('pdf_probe_ffi.dll')
+    const mac = JSON.parse(readFileSync(join(buildPlatformPackage('darwin-arm64', lib, join(tmp, 'out')), 'package.json'), 'utf8'))
+    expect(mac.libc).toBeUndefined()
+    expect(mac.files[0]).toBe('libpdf_probe_ffi.dylib')
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }

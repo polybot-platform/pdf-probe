@@ -1,5 +1,7 @@
 # pdf-probe
 
+[![crates.io](https://img.shields.io/crates/v/pdf-probe.svg)](https://crates.io/crates/pdf-probe) [![docs.rs](https://docs.rs/pdf-probe/badge.svg)](https://docs.rs/pdf-probe) [![npm](https://img.shields.io/npm/v/pdf-probe.svg)](https://www.npmjs.com/package/pdf-probe)
+
 A small, fail-closed reader for untrusted PDFs. Given the bytes of a PDF and a page cap, it returns:
 
 - **Page count** (`pages`)

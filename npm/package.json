@@ -1,6 +1,6 @@
 {
   "name": "pdf-probe",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "A small, fail-closed reader for untrusted PDFs: page count, effective page sizes, and structural flags. WebAssembly and native FFI for Node, Bun, and browsers.",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -37,11 +37,11 @@
     "node": ">=20"
   },
   "optionalDependencies": {
-    "pdf-probe-linux-x64": "0.5.2",
-    "pdf-probe-linux-arm64": "0.5.2",
-    "pdf-probe-linux-x64-musl": "0.5.2",
-    "pdf-probe-darwin-arm64": "0.5.2",
-    "pdf-probe-darwin-x64": "0.5.2"
+    "pdf-probe-linux-x64": "0.5.3",
+    "pdf-probe-linux-arm64": "0.5.3",
+    "pdf-probe-linux-x64-musl": "0.5.3",
+    "pdf-probe-darwin-arm64": "0.5.3",
+    "pdf-probe-darwin-x64": "0.5.3"
   },
   "scripts": {
     "build": "bun run build.ts"

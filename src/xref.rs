@@ -538,28 +538,36 @@ pub(crate) fn scan(data: &[u8], limits: &Limits, meter: &Meter) -> Result<Scan, 
     }
 
     // Cross-reference streams found by the scan add entries for objects the scan did not see (those in
-    // object streams, mostly). Each is followed through `/Prev`; errors are ignored.
+    // object streams, mostly). Each is followed through `/Prev`; damaged sections are skipped, but the limits
+    // hold as they do for the normal reader, so no answer comes from a silently partial index.
     let mut decoded = 0usize;
     let mut top: Option<Dict> = None;
+    // Shared by all the chains: a section read once has already added everything it can (the first entry
+    // for a number wins), so another chain reaching it stops there. That bounds the reads by
+    // `max_xref_sections` in all, instead of per chain.
+    let mut seen = HashSet::new();
     for start in xref_streams {
-        let (mut queue, mut seen) = (vec![start], HashSet::new());
-        while !queue.is_empty() {
-            let at = queue.remove(0);
-            if !seen.insert(at) || seen.len() > limits.max_xref_sections {
-                continue;
+        let mut next = Some(start);
+        while let Some(at) = next.take() {
+            if !seen.insert(at) {
+                break;
+            }
+            if seen.len() > limits.max_xref_sections {
+                return Err(Failure::LimitExceeded(Limit::XrefSections));
             }
             match read_section(data, at, limits, &mut decoded, meter) {
                 Ok((section, dict)) => {
                     for (num, entry) in section {
-                        if entries.len() < limits.max_objects || entries.contains_key(&num) {
-                            entries.entry(num).or_insert(entry);
+                        if entries.len() >= limits.max_objects && !entries.contains_key(&num) {
+                            return Err(Failure::LimitExceeded(Limit::Objects));
                         }
+                        entries.entry(num).or_insert(entry);
                     }
-                    queue.extend(prev_offset(&dict));
+                    next = prev_offset(&dict);
                     top.get_or_insert(dict);
                 }
                 Err(e @ Failure::LimitExceeded(_)) => return Err(e),
-                Err(_) => continue,
+                Err(_) => {}
             }
         }
     }

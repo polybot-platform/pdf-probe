@@ -280,6 +280,11 @@ fn page_size(doc: &mut Doc, page: &Dict, inherit: &Inherit) -> Result<(PageSize,
         _ => 1.0,
     };
     let (mut width, mut height) = ((view[2] - view[0]) * unit, (view[3] - view[1]) * unit);
+    // Every input is finite, but the subtraction and `/UserUnit` can still overflow to infinity or underflow
+    // to zero or a subnormal. No such size is a real page; a caller's size policy must not have to handle it.
+    if !(width.is_normal() && height.is_normal()) {
+        return Err(Failure::Unparseable("page size out of range"));
+    }
     if rotate == 90 || rotate == 270 {
         std::mem::swap(&mut width, &mut height);
     }

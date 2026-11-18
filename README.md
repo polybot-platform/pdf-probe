@@ -59,7 +59,7 @@ Answering that with a full PDF library loads a rendering engine, font parser, an
 ## What it supports
 
 - **Fails closed.** Damaged structure, unsupported filters, or non-empty passwords return `Unparseable`, never a guess.
-- **Effective page size.** `MediaBox` intersected with `CropBox` (falling back to `MediaBox` if they do not overlap), inherited down the page tree, with `/Rotate` (90°/180°/270°) and `/UserUnit` applied.
+- **Effective page size.** `MediaBox` intersected with `CropBox` (falling back to `MediaBox` if they do not overlap), inherited down the page tree, with `/Rotate` (90°/180°/270°) and `/UserUnit` applied. A size that overflows to infinity or underflows to zero (or a subnormal) is `Unparseable` (`page size out of range`).
 - **Real-world PDFs.** Classic cross-reference tables, cross-reference streams, hybrid files (`/XRefStm`), incremental updates (`/Prev` chains), compressed object streams (`/ObjStm`), Flate with PNG predictors (`10..=15`), and standard encryption with an empty user password (RC4 40–128 bit, AES-128, AES-256 revisions 5 and 6).
 - **Damaged cross-references.** When the cross-reference table or stream is missing or damaged, a bounded recovery scan indexes indirect objects and trailers using the same rules as `pdf.js` (and sets `repaired: true`).
 - **Page count follows `/Count`.** Like `pdf.js` and poppler, it trusts a valid `/Count` on the root `/Pages` node and falls back to walking the full tree when `/Count` is missing, invalid, or larger than the actual tree.

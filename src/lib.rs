@@ -825,6 +825,38 @@ mod tests {
     }
 
     #[test]
+    fn sizes_that_overflow_or_underflow_are_refused() {
+        let big = format!("1{}", "0".repeat(308)); // 1e308: finite, but twice it is not
+        let tiny = format!("0.{}5", "0".repeat(322)); // about 5e-324, the smallest subnormal
+        for page in [
+            format!("/MediaBox [-{big} 0 {big} 792]"),
+            format!("/MediaBox [0 -{big} 612 {big}]"),
+            format!("/MediaBox [0 0 612 792] /UserUnit {big}"),
+            format!("/MediaBox [0 0 0.5 0.5] /UserUnit {tiny}"),
+            format!("/MediaBox [0 0 612 792] /UserUnit 0.{}1", "0".repeat(319)), // 612e-320: subnormal
+        ] {
+            assert_eq!(
+                probe(&one_page(&page), &Limits::default()),
+                Err(Failure::Unparseable("page size out of range")),
+                "{page}"
+            );
+        }
+        // Large and small but representable sizes are still answered.
+        let p = probe(
+            &one_page("/MediaBox [0 0 612 792] /UserUnit 0.000001"),
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(p.sizes[0].width > 0.0 && p.sizes[0].width < 0.001);
+        let p = probe(
+            &one_page(&format!("/MediaBox [0 0 1 1] /UserUnit {big}")),
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(p.sizes[0].width, 1e308);
+    }
+
+    #[test]
     fn crop_box_with_no_overlap_falls_back_to_the_media_box() {
         let p = probe(
             &one_page("/MediaBox [0 0 600 800] /CropBox [600 800 1000 1000]"),

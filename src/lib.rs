@@ -340,14 +340,18 @@ impl<'a> Doc<'a> {
         if n > self.limits.max_objects {
             return Err(Failure::LimitExceeded(Limit::Objects));
         }
-        let remaining = self.limits.max_decompressed.saturating_sub(self.decoded);
         let raw: &'a [u8] = &self.data[range];
         let raw = match &self.crypto {
             Some(crypto) => crypto.decrypt_stream(stream, ind.gen_, &dict, raw, self.meter)?,
             None => Cow::Borrowed(raw),
         };
-        let bytes = stream::decode(&dict, raw, remaining, self.meter)?;
-        self.decoded += bytes.len();
+        let bytes = stream::decode(
+            &dict,
+            raw,
+            &mut self.decoded,
+            self.limits.max_decompressed,
+            self.meter,
+        )?;
         let mut lx = Lexer::new(&bytes, 0, self.meter);
         let mut index = Vec::new();
         for _ in 0..n {

@@ -219,9 +219,13 @@ fn read_xref_stream(
     if !matches!(dict.get(b"Type"), Some(Obj::Name(n)) if n[..] == *b"XRef") {
         return fail("not a cross-reference stream");
     }
-    let remaining = limits.max_decompressed.saturating_sub(*decoded);
-    let bytes = stream::decode(&dict, Cow::Borrowed(&data[range]), remaining, meter)?;
-    *decoded += bytes.len();
+    let bytes = stream::decode(
+        &dict,
+        Cow::Borrowed(&data[range]),
+        decoded,
+        limits.max_decompressed,
+        meter,
+    )?;
     meter.charge(bytes.len() as u64)?; // reading the entries
 
     let widths: Vec<usize> = match dict.get(b"W") {

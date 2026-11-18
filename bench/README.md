@@ -28,6 +28,18 @@ bun run bench.ts --all --dir <directory of PDFs> --limit 300 --concurrency 1,8
 # optional: --rounds 3 --idle 15 --max-pages 50 --native-lib /path/to/libpdf_probe_ffi.so
 ```
 
+`pdf-probe@0.1.0` stays pinned on purpose: it is the baseline the earlier numbers were taken against. To measure
+the code in this repository as well, build the package at the repository root and add `--checkout`:
+
+```sh
+(cd .. && bun run npm/build.ts)
+bun run bench.ts --all --dir <directory of PDFs> --checkout
+```
+
+That adds two engines, `wasm@checkout` and `native@checkout`, loaded from `../npm/dist` with the native library
+built for this platform. The header records the published version and the checkout's version and commit. The
+build is not checked against the commit, so rebuild after every change you want to measure.
+
 It writes `bench-results.json` (every number and every verdict) next to where you run it. The CPU governor and the
 container's cgroup limits are printed in the header: on a laptop on `powersave`, timings are not meaningful.
 

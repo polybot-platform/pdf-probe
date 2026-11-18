@@ -1,10 +1,14 @@
 // Compares the service's page check (checkReadablePdf: unpdf) with pdf-probe on one directory of PDFs.
 //
 //   bun run bench.ts --all --dir <pdf-dir> [--limit 300] [--rounds 3] [--idle 15] [--max-pages 50]
-//                    [--concurrency 1,8] [--native-lib /path/to/libpdf_probe_ffi.so]
+//                    [--concurrency 1,8] [--native-lib /path/to/libpdf_probe_ffi.so] [--checkout]
 //
 // `--all` runs every engine in a FRESH process (memory is per process), once for each concurrency, and prints
-// a table. One engine alone: `--engine unpdf|wasm|native`, which prints a JSON line.
+// a table. One engine alone: `--engine unpdf|wasm|native|wasm@checkout|native@checkout`, which prints a JSON line.
+//
+// `wasm` and `native` are the published pdf-probe that package.json pins: the baseline, kept on purpose so that
+// numbers stay comparable over time. `--checkout` adds `wasm@checkout` and `native@checkout`: the package built
+// from this repository (`bun run npm/build.ts` at the root first), to measure a change before it is released.
 //
 // The unpdf check below is a copy of checkReadablePdf (backend/src/services/attachments/attachment-reading.service.ts),
 // the page limits included. The pdf-probe checks apply the same rules to the sizes it returns.
@@ -15,7 +19,7 @@
 // plus the process's peak RSS. Memory is NOT forced down with gc after the baseline: an idle server does not
 // get to run gc on demand, and Bun discards JIT code on its own, which is exactly the effect to see.
 // Numbers from a laptop are an ordering, not a result: run it in the target container.
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 const args = process.argv.slice(2)
@@ -30,6 +34,9 @@ const rounds = Number(opt('rounds', '3'))
 const idleSeconds = Number(opt('idle', '15'))
 const maxPages = Number(opt('max-pages', '50')) // BUSINESS tier; STARTUP is 20
 const nativeLib = opt('native-lib')
+// The package `bun run npm/build.ts` builds from this checkout, with its own native library for this platform.
+const checkoutPackage = new URL('../npm/dist/index.js', import.meta.url)
+const checkoutVersion = () => JSON.parse(readFileSync(new URL('../npm/package.json', import.meta.url), 'utf8')).version as string
 
 const MAX_READ_PAGE_INCHES = { long: 17.5, short: 12 } as const
 const isOversizedPage = (width: number, height: number) =>
@@ -94,8 +101,12 @@ async function runChild(engine: string, concurrency: number) {
     }
     await import('unpdf').then((m) => m.getResolvedPDFJS())
   } else {
-    const { createProbe } = await import('pdf-probe')
-    const probe = await createProbe({ engine: engine as 'wasm' | 'native', ...(nativeLib ? { nativeLibrary: nativeLib } : {}) })
+    const [kind, source] = engine.split('@')
+    const fromCheckout = source === 'checkout'
+    const { createProbe } = fromCheckout ? await import(checkoutPackage.href) : await import('pdf-probe')
+    // --native-lib is for the published package; the checkout's package finds the library it was built with.
+    const library = nativeLib && !fromCheckout ? { nativeLibrary: nativeLib } : {}
+    const probe = await createProbe({ engine: kind as 'wasm' | 'native', ...library })
     check = (bytes) => {
       const result = probe.check(bytes, { maxPages })
       if (result.status === 'tooManyPages') return 'pages'
@@ -169,7 +180,9 @@ async function runChild(engine: string, concurrency: number) {
 
 async function runAll() {
   const concurrencies = (opt('concurrency', '1,8') ?? '1').split(',').map(Number)
-  const engines = ['unpdf', 'wasm', ...(nativeLib ? ['native'] : [])]
+  const checkout = args.includes('--checkout')
+  if (checkout && !existsSync(checkoutPackage)) throw new Error('--checkout needs the package built: run `bun run npm/build.ts` at the repository root')
+  const engines = ['unpdf', 'wasm', ...(nativeLib ? ['native'] : []), ...(checkout ? ['wasm@checkout', 'native@checkout'] : [])]
   const files = listPdfs()
   const env = {
     bun: Bun.version,
@@ -177,6 +190,8 @@ async function runAll() {
     governor: read('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor'),
     cgroupCpuMax: read('/sys/fs/cgroup/cpu.max'),
     cgroupMemoryMax: read('/sys/fs/cgroup/memory.max'),
+    published: JSON.parse(readFileSync(new URL('package.json', import.meta.url), 'utf8')).dependencies['pdf-probe'],
+    checkout: checkout ? `${checkoutVersion()} at ${Bun.spawnSync(['git', 'rev-parse', '--short', 'HEAD']).stdout.toString().trim()}` : null,
   }
   console.log(`# ${files.length} files (${r1(files.reduce((s, f) => s + statSync(f).size, 0) / 1048576)} MB), maxPages ${maxPages}, ${rounds} rounds, idle ${idleSeconds}s`)
   console.log(`# ${JSON.stringify(env)}`)

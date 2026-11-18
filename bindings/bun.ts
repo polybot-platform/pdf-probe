@@ -2,7 +2,7 @@
 // for the result layout. `bun:ffi` is imported lazily so that this file can be bundled into a package that
 // also runs under Node, where the native engine is simply never loaded.
 import { fileURLToPath } from 'node:url'
-import { ABI_VERSION, bufferSizeFor, decodeResult, HEADER, type ProbeResult } from './result.ts'
+import { ABI_VERSION, bufferSizeFor, decodeResult, DEFAULT_MAX_INPUT_BYTES, HEADER, type ProbeResult } from './result.ts'
 
 export type { PageSize, ProbeResult } from './result.ts'
 
@@ -35,6 +35,13 @@ export async function loadPdfProbe(path?: string) {
    * `maxInputBytes` and `maxWorkMillions` of 0 mean the library's defaults.
    */
   function check(bytes: Uint8Array, maxPages: number, maxInputBytes = 0, maxWorkMillions = 0): ProbeResult {
+    // Rust reads the input as `&[u8]`, which promises that nothing changes it during the call. Memory shared
+    // with another worker can, so it is copied first, after the size check that Rust would otherwise do, so
+    // that the copy is bounded. Ordinary buffers are passed without a copy.
+    if (bytes.buffer instanceof SharedArrayBuffer) {
+      if (bytes.length > (maxInputBytes || DEFAULT_MAX_INPUT_BYTES)) return { status: 'limitExceeded', limit: 'inputBytes' }
+      bytes = bytes.slice()
+    }
     const want = bufferSizeFor(maxPages)
     if (out.length < want) out = new Uint8Array(want)
     const call = () =>

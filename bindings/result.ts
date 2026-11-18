@@ -28,7 +28,12 @@ export const DEFAULT_MAX_INPUT_BYTES = 10 * 1024 * 1024
 const STATUS = ['ok', 'unparseable', 'empty', 'tooManyPages', 'panic', 'limitExceeded'] as const
 const DECODER = new TextDecoder()
 
-/** The buffer size that fits any answer for a page cap, so a retry is rarely needed. */
+/**
+ * The buffer size that fits any answer for a page cap up to 10,000 pages. A larger answer makes the call parse
+ * the file a second time, once per probe: both bindings then keep the bigger buffer. Measured in #31 at 100,000
+ * pages, that is one extra parse (about 39 ms native) for the first such file; not worth keeping state across
+ * calls, or allocating up to 16 MB up front for a high `maxPages`.
+ */
 export function bufferSizeFor(maxPages: number): number {
   return HEADER + 16 * Math.min(maxPages, 10_000) + 256
 }

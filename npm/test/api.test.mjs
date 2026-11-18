@@ -151,6 +151,15 @@ for (const engine of engines) {
     assert.equal(probe.check(new Uint8Array(mib10 + 1), { maxInputBytes: mib10 + 1 }).status, 'unparseable')
   })
 
+  test(`${engine}: input in shared memory gives the same answers`, async () => {
+    const probe = await createProbe({ engine })
+    const shared = new Uint8Array(new SharedArrayBuffer(pdf.length + 8), 4, pdf.length)
+    shared.set(pdf)
+    assert.deepEqual(probe.check(shared), probe.check(pdf))
+    // The cap still comes first: an input over it is refused before anything is copied.
+    assert.deepEqual(probe.check(shared, { maxInputBytes: pdf.length - 1 }), { status: 'limitExceeded', limit: 'inputBytes' })
+  })
+
   test(`${engine}: maxWork stops work that is large only in total`, async () => {
     const probe = await createProbe({ engine })
     // One inherited array that every page uses is read once, however many pages there are.

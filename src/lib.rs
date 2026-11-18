@@ -340,14 +340,18 @@ impl<'a> Doc<'a> {
         if n > self.limits.max_objects {
             return Err(Failure::LimitExceeded(Limit::Objects));
         }
-        let remaining = self.limits.max_decompressed.saturating_sub(self.decoded);
         let raw: &'a [u8] = &self.data[range];
         let raw = match &self.crypto {
             Some(crypto) => crypto.decrypt_stream(stream, ind.gen_, &dict, raw, self.meter)?,
             None => Cow::Borrowed(raw),
         };
-        let bytes = stream::decode(&dict, raw, remaining, self.meter)?;
-        self.decoded += bytes.len();
+        let bytes = stream::decode(
+            &dict,
+            raw,
+            &mut self.decoded,
+            self.limits.max_decompressed,
+            self.meter,
+        )?;
         let mut lx = Lexer::new(&bytes, 0, self.meter);
         let mut index = Vec::new();
         for _ in 0..n {
@@ -1328,6 +1332,87 @@ mod tests {
                 "startxref {bad}"
             );
         }
+    }
+
+    /// A one-page file the recovery scan has to read: a broken `startxref` and `count` cross-reference
+    /// streams, each listing `listed` free objects from 100 on, each pointing `/Prev` at the one before when
+    /// `chained`.
+    fn recovered_with_xref_streams(count: usize, chained: bool, listed: u32) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.5\n".to_vec();
+        for (n, body) in [
+            (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"),
+        ] {
+            pdf.extend(format!("{n} 0 obj\n{body}\nendobj\n").bytes());
+        }
+        let rows = vec![0u8; 3 * listed as usize];
+        let mut prev = None;
+        for i in 0..count {
+            let at = pdf.len();
+            let prev_entry = match prev {
+                Some(p) if chained => format!("/Prev {p} "),
+                _ => String::new(),
+            };
+            pdf.extend(
+                format!(
+                    "{} 0 obj\n<< /Type /XRef /Size {} /Index [100 {listed}] /W [1 1 1] /Root 1 0 R \
+                     {prev_entry}/Length {} >>\nstream\n",
+                    10 + i,
+                    100 + listed,
+                    rows.len()
+                )
+                .bytes(),
+            );
+            pdf.extend(&rows);
+            pdf.extend(b"\nendstream\nendobj\n");
+            prev = Some(at);
+        }
+        pdf.extend(b"startxref\n999999\n%%EOF\n");
+        pdf
+    }
+
+    #[test]
+    fn recovery_reports_the_object_limit_instead_of_dropping_entries() {
+        // 4 objects found by the scan, and a section of 28: each is under 30, together they are not.
+        let pdf = recovered_with_xref_streams(1, false, 28);
+        let p = probe(&pdf, &Limits::default()).unwrap();
+        assert!(p.repaired);
+        assert_eq!(p.pages, 1);
+        assert_eq!(
+            probe(&pdf, &Limits::default().max_objects(30)),
+            Err(Failure::LimitExceeded(Limit::Objects))
+        );
+    }
+
+    #[test]
+    fn recovery_reports_the_section_limit_for_all_chains_together() {
+        for chained in [true, false] {
+            let pdf = recovered_with_xref_streams(5, chained, 1);
+            assert_eq!(
+                probe(&pdf, &Limits::default().max_xref_sections(5)).map(|p| p.pages),
+                Ok(1)
+            );
+            assert_eq!(
+                probe(&pdf, &Limits::default().max_xref_sections(4)),
+                Err(Failure::LimitExceeded(Limit::XrefSections)),
+                "chained: {chained}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_reads_a_section_shared_by_several_chains_once() {
+        // Every stream found is a root, and stream k's chain runs back through all k before it. Read per
+        // chain that is count² / 2 sections; read once each, the work grows with the count.
+        let limits = Limits::default().max_xref_sections(1_000);
+        let work = |count| {
+            probe(&recovered_with_xref_streams(count, true, 1), &limits)
+                .unwrap()
+                .work
+        };
+        let (small, large) = (work(200), work(400));
+        assert!(large < small * 5 / 2, "{small} then {large}");
     }
 
     #[test]

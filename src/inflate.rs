@@ -26,14 +26,22 @@ const CLORDER: [usize; 19] = [
 ];
 
 /// Decodes a zlib stream (2-byte header, DEFLATE data; the Adler-32 trailer is not checked, as in pdf.js).
+#[cfg(test)]
 pub(crate) fn zlib(input: &[u8], max_out: usize) -> Res<Vec<u8>> {
+    let mut out = Vec::new();
+    zlib_into(input, max_out, &mut out).map(|()| out)
+}
+
+/// [`zlib`], writing into `out`, which is left empty. On an error `out` keeps what was decoded before it, so
+/// the caller can count that work too: a stream that fails near its end has done nearly all of it.
+pub(crate) fn zlib_into(input: &[u8], max_out: usize, out: &mut Vec<u8>) -> Res<()> {
     let (Some(&cmf), Some(&flg)) = (input.first(), input.get(1)) else {
         return Err("zlib stream too short");
     };
     if cmf & 0x0f != 8 || ((u16::from(cmf) << 8) | u16::from(flg)) % 31 != 0 || flg & 0x20 != 0 {
         return Err("bad zlib header");
     }
-    inflate(&input[2..], max_out)
+    inflate_into(&input[2..], max_out, out)
 }
 
 struct Reader<'a> {
@@ -198,15 +206,15 @@ const FIXED_DIST: Huffman<30> = match build(&[5u8; 30]) {
     Err(_) => unreachable!(),
 };
 
-pub(crate) fn inflate(input: &[u8], max_out: usize) -> Res<Vec<u8>> {
+fn inflate_into(input: &[u8], max_out: usize, out: &mut Vec<u8>) -> Res<()> {
+    debug_assert!(out.is_empty());
     let mut r = Reader {
         data: input,
         pos: 0,
         bitbuf: 0,
         bitcnt: 0,
     };
-    let mut out: Vec<u8> =
-        Vec::with_capacity(input.len().saturating_mul(2).min(max_out).min(64 << 10));
+    out.reserve(input.len().saturating_mul(2).min(max_out).min(64 << 10));
     let max_blocks = (input.len() / 2).max(64);
     let mut blocks = 0usize;
     loop {
@@ -216,18 +224,18 @@ pub(crate) fn inflate(input: &[u8], max_out: usize) -> Res<Vec<u8>> {
         }
         let last = r.bits(1)?;
         match r.bits(2)? {
-            0 => stored(&mut r, &mut out, max_out)?,
+            0 => stored(&mut r, out, max_out)?,
             1 => {
-                codes(&mut r, &mut out, &FIXED_LIT, &FIXED_DIST, max_out)?;
+                codes(&mut r, out, &FIXED_LIT, &FIXED_DIST, max_out)?;
             }
             2 => {
                 let (lit, dist) = dynamic_tables(&mut r)?;
-                codes(&mut r, &mut out, &lit, &dist, max_out)?;
+                codes(&mut r, out, &lit, &dist, max_out)?;
             }
             _ => return Err("bad deflate block type"),
         }
         if last == 1 {
-            return Ok(out);
+            return Ok(());
         }
     }
 }

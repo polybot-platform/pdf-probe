@@ -19,12 +19,16 @@ fn from_inflate(why: &'static str) -> Failure {
     }
 }
 
-/// Decodes `raw` through the stream dictionary's `/Filter` chain, writing at most `max_out` bytes per stage.
-/// Charges the meter for the work. With no filter to apply, `raw` is returned as given, owned or borrowed.
+/// Decodes `raw` through the stream dictionary's `/Filter` chain. `decoded` counts the bytes inflated in the
+/// whole call, against `max_decoded`: every stage of a chain adds what it produced, including a stage that
+/// then fails, so a chain cannot hold more than the limit at once and failures cannot repeat for free.
+/// Charges the meter for the same work. With no filter to apply, `raw` is returned as given, owned or
+/// borrowed, and nothing is counted: those are the file's own bytes.
 pub(crate) fn decode<'a>(
     dict: &Dict,
     raw: Cow<'a, [u8]>,
-    max_out: usize,
+    decoded: &mut usize,
+    max_decoded: usize,
     meter: &Meter,
 ) -> Res<Cow<'a, [u8]>> {
     let filters: &[Obj] = match dict.get(b"Filter") {
@@ -57,15 +61,18 @@ pub(crate) fn decode<'a>(
             return bad("unsupported filter");
         }
         meter.charge(cost::INFLATE_IN * data.len() as u64)?;
-        let inflated = inflate::zlib(&data, max_out).map_err(from_inflate)?;
+        let mut inflated = Vec::new();
+        let result = inflate::zlib_into(&data, max_decoded.saturating_sub(*decoded), &mut inflated);
+        // Counted before the result is looked at: the work was done either way.
+        *decoded = decoded.saturating_add(inflated.len());
         meter.charge(cost::INFLATE_OUT * inflated.len() as u64)?;
+        result.map_err(from_inflate)?;
+        // Predictors only shrink their input, so the inflated length already covers them.
         data = Cow::Owned(match parms.get(i) {
             Some(Obj::Dict(p)) => predict(p, inflated, meter)?,
             _ => inflated,
         });
     }
-    // Each inflate stage is already capped at `max_out` and predictors only shrink their input. Unfiltered
-    // data is the file's own bytes, so it is not counted against the decompression limit.
     Ok(data)
 }
 
@@ -234,19 +241,99 @@ mod tests {
         for source in ["<< >>", "<< /Filter /Crypt >>", "<< /Filter [] >>"] {
             let d = dict(source);
             for max_out in [3, 2, 0] {
+                let mut decoded = 0;
                 assert!(matches!(
-                    decode(&d, Cow::Borrowed(b"abc"), max_out, &meter).unwrap(),
+                    decode(&d, Cow::Borrowed(b"abc"), &mut decoded, max_out, &meter).unwrap(),
                     Cow::Borrowed(b"abc")
                 ));
+                assert_eq!(decoded, 0, "the file's own bytes are not counted");
             }
         }
+    }
+
+    /// A zlib stream of stored (uncompressed) blocks, one per part; the last is marked final unless `open`.
+    fn stored(parts: &[&[u8]], open: bool) -> Vec<u8> {
+        let mut z = vec![0x78, 0x01];
+        for (i, part) in parts.iter().enumerate() {
+            z.push(u8::from(i + 1 == parts.len() && !open));
+            let len = part.len() as u16;
+            z.extend(len.to_le_bytes());
+            z.extend((!len).to_le_bytes());
+            z.extend(*part);
+        }
+        z
+    }
+
+    #[test]
+    fn a_failed_inflation_is_still_counted_and_charged() {
+        // 1000 bytes come out, then the data ends without a final block.
+        let z = stored(&[&[7; 1000]], true);
+        let d = dict("<< /Filter /FlateDecode >>");
+        let meter = Meter::new(u64::MAX);
+        let mut decoded = 5;
+        assert_eq!(
+            decode(&d, Cow::Borrowed(&z), &mut decoded, 1 << 20, &meter),
+            Err(Failure::Unparseable("unexpected end of deflate data"))
+        );
+        assert_eq!(decoded, 1005);
+        let input = cost::INFLATE_IN * z.len() as u64;
+        assert_eq!(meter.used(), input + cost::INFLATE_OUT * 1000);
+    }
+
+    #[test]
+    fn a_filter_chain_shares_one_allowance() {
+        let inner = stored(&[&[1; 300]], false);
+        let outer = stored(&[&inner], false);
+        let d = dict("<< /Filter [/FlateDecode /Fl] >>");
+        let both = outer.len() - 2 - 5 + 300; // the outer stage gives back `inner`, the inner one 300 bytes
+        let mut decoded = 0;
+        let out = decode(
+            &d,
+            Cow::Borrowed(&outer),
+            &mut decoded,
+            both,
+            &Meter::new(u64::MAX),
+        );
+        assert_eq!(out.unwrap().len(), 300);
+        assert_eq!(decoded, both);
+        // One byte less, and the second stage is over the limit: each stage no longer gets the whole of it.
+        let mut decoded = 0;
+        assert_eq!(
+            decode(
+                &d,
+                Cow::Borrowed(&outer),
+                &mut decoded,
+                both - 1,
+                &Meter::new(u64::MAX)
+            ),
+            Err(Failure::LimitExceeded(Limit::Decompressed))
+        );
+        // Earlier streams in the call count too.
+        let mut decoded = 1;
+        assert_eq!(
+            decode(
+                &d,
+                Cow::Borrowed(&outer),
+                &mut decoded,
+                both,
+                &Meter::new(u64::MAX)
+            ),
+            Err(Failure::LimitExceeded(Limit::Decompressed))
+        );
     }
 
     #[test]
     fn unfiltered_owned_input_is_passed_through_without_a_copy() {
         let data = b"decrypted".to_vec();
         let at = data.as_ptr();
-        let out = decode(&dict("<< >>"), Cow::Owned(data), 0, &Meter::new(u64::MAX)).unwrap();
+        let out = decode(
+            &dict("<< >>"),
+            Cow::Owned(data),
+            &mut 0,
+            0,
+            &Meter::new(u64::MAX),
+        )
+        .unwrap();
         assert!(matches!(&out, Cow::Owned(v) if v.as_ptr() == at));
     }
 
@@ -254,14 +341,26 @@ mod tests {
     fn filter_parameters_are_validated_before_decoding() {
         let d = dict("<< /Filter [/FlateDecode] /DecodeParms [null 1] >>");
         assert_eq!(
-            decode(&d, Cow::Borrowed(b"bad zlib"), 10, &Meter::new(u64::MAX)),
+            decode(
+                &d,
+                Cow::Borrowed(b"bad zlib"),
+                &mut 0,
+                10,
+                &Meter::new(u64::MAX)
+            ),
             Err(Failure::Unparseable(
                 "indirect /DecodeParms are not supported yet"
             ))
         );
         let d = dict("<< /Filter [/FlateDecode 1] >>");
         assert_eq!(
-            decode(&d, Cow::Borrowed(b"bad zlib"), 10, &Meter::new(u64::MAX)),
+            decode(
+                &d,
+                Cow::Borrowed(b"bad zlib"),
+                &mut 0,
+                10,
+                &Meter::new(u64::MAX)
+            ),
             Err(Failure::Unparseable("unsupported /Filter entry"))
         );
     }

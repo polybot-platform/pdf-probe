@@ -54,13 +54,18 @@ fn filter_method(name: &[u8], handler: Option<&Obj>) -> Method {
         return Method::Identity;
     }
     match handler {
-        Some(Obj::Dict(d)) => match name_of(d.get(b"CFM")) {
-            Some(b"V2") => Method::Rc4,
-            Some(b"AESV2") => Method::AesV2,
-            Some(b"AESV3") => Method::AesV3,
-            // `None`, a missing /CFM or anything unknown: no encryption, as in pdf.js.
-            _ => Method::Identity,
-        },
+        Some(Obj::Dict(d)) => handler_method(d),
+        _ => Method::Identity,
+    }
+}
+
+/// The method a crypt filter dictionary names with `/CFM`.
+fn handler_method(handler: &Dict) -> Method {
+    match name_of(handler.get(b"CFM")) {
+        Some(b"V2") => Method::Rc4,
+        Some(b"AESV2") => Method::AesV2,
+        Some(b"AESV3") => Method::AesV3,
+        // `None`, a missing /CFM or anything unknown: no encryption, as in pdf.js.
         _ => Method::Identity,
     }
 }
@@ -203,12 +208,30 @@ pub(crate) fn setup(doc: &mut Doc) -> Result<Option<Crypto>, Failure> {
 /// The method of each named crypt filter, for streams that pick one. Takes the resolved `/CF` so that its
 /// keys move into the index instead of being copied.
 fn index_filters(cf: HashMap<Vec<u8>, Obj>) -> HashMap<Vec<u8>, Method> {
-    cf.into_iter()
-        .map(|(name, handler)| {
-            let method = filter_method(&name, Some(&handler));
-            (name, method)
-        })
-        .collect()
+    index_filters_with(cf, handler_method)
+}
+
+/// [`index_filters`], reading each distinct handler once with `method_of`. Many names can share one indirect
+/// handler, which the shared cache hands back without parsing it again (and so without charging for it); a
+/// `/CFM` search per name would then cost names x handler size, none of it counted.
+fn index_filters_with(
+    cf: HashMap<Vec<u8>, Obj>,
+    mut method_of: impl FnMut(&Dict) -> Method,
+) -> HashMap<Vec<u8>, Method> {
+    // Keyed by the handler's storage, which `cf` keeps alive (and so unique) until this returns.
+    let mut by_handler: HashMap<*const (), Method> = HashMap::new();
+    let mut index = HashMap::with_capacity(cf.len());
+    for (name, handler) in cf {
+        let method = match &handler {
+            _ if name == b"Identity" => Method::Identity,
+            Obj::Dict(d) => *by_handler
+                .entry(std::rc::Rc::as_ptr(&d.0).cast())
+                .or_insert_with(|| method_of(d)),
+            _ => Method::Identity,
+        };
+        index.insert(name, method);
+    }
+    index
 }
 
 /// Algorithm 2 and the user-password check (algorithms 4 and 5), revisions 2 to 4, empty password.
@@ -502,6 +525,40 @@ mod tests {
         assert_eq!(many.unwrap().filters.len(), 20_001);
         assert_eq!(few.unwrap().filters.len(), 1);
         assert_eq!(many_work, few_work);
+    }
+
+    #[test]
+    fn a_handler_shared_by_many_names_is_read_once() {
+        // What resolving `/CF << /A 3 0 R /B 3 0 R ... >>` gives when object 3 is in the shared cache: every
+        // name holds the same handler. Reading it once per name would be names x handler size, uncharged.
+        let Some(Obj::Dict(shared)) =
+            Lexer::new(b"<< /CFM /AESV2 /Length 16 >>", 0, &Meter::new(u64::MAX)).parse_obj()
+        else {
+            panic!("handler");
+        };
+        let Some(Obj::Dict(other)) =
+            Lexer::new(b"<< /CFM /V2 >>", 0, &Meter::new(u64::MAX)).parse_obj()
+        else {
+            panic!("handler");
+        };
+        let mut cf: HashMap<Vec<u8>, Obj> = (0..1_000)
+            .map(|i| (format!("F{i}").into_bytes(), Obj::Dict(shared.clone())))
+            .collect();
+        cf.insert(b"Other".to_vec(), Obj::Dict(other));
+        cf.insert(b"Identity".to_vec(), Obj::Dict(shared.clone()));
+        cf.insert(b"NotADict".to_vec(), Obj::Int(1));
+        let mut reads = 0;
+        let index = index_filters_with(cf, |d| {
+            reads += 1;
+            handler_method(d)
+        });
+        assert_eq!(reads, 2);
+        assert_eq!(index.len(), 1_003);
+        assert_eq!(index[b"F0".as_slice()], Method::AesV2);
+        assert_eq!(index[b"F999".as_slice()], Method::AesV2);
+        assert_eq!(index[b"Other".as_slice()], Method::Rc4);
+        assert_eq!(index[b"Identity".as_slice()], Method::Identity);
+        assert_eq!(index[b"NotADict".as_slice()], Method::Identity);
     }
 
     /// A revision 5 (SHA-256) user entry for the empty password and the given file key, as a generator

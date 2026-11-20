@@ -10,6 +10,8 @@ A small, fail-closed reader for untrusted PDFs. Given the bytes of a PDF and a p
 
 It does not render, extract text, decode images, or edit anything. Anything it cannot parse with confidence is refused (`unparseable`), never guessed at. Written in Rust with zero dependencies and `#![forbid(unsafe_code)]` in the parser, and shipped as WebAssembly and a native C ABI library.
 
+Built and maintained by the team behind [Polybot](https://polybotplatform.com), a platform for building virtual assistants that perform tasks, answer questions, and connect to your tools.
+
 ## Quick start
 
 ### JavaScript / TypeScript (Node, Bun, browsers, workers)

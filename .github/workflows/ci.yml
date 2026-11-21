@@ -1,9 +1,13 @@
 name: CI
 
+# A change to Markdown alone skips this workflow: no build or test reads a .md file. (The npm tarball carries
+# npm/README.md, but nothing checks its text.) A change to any other file runs everything.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md']
   pull_request:
+    paths-ignore: ['**.md']
 
 permissions:
   contents: read

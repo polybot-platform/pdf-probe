@@ -7,10 +7,16 @@ name: Native library
 # Windows is built and tested but not packed (ship: false): see npm/src/platform.ts.
 # Nothing is published from here. release.yml calls this workflow on a version tag and publishes the tarballs
 # it makes, so the actions here are pinned to commits, like the ones in release.yml.
+#
+# A change to Markdown alone skips this workflow: no build or test reads a .md file. (The npm tarball carries
+# npm/README.md, but nothing checks its text.) A change to any other file runs everything. workflow_call has no
+# path filter, so a release always runs the full build.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md']
   pull_request:
+    paths-ignore: ['**.md']
   workflow_call:
 
 permissions:

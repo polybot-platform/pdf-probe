@@ -8,6 +8,8 @@ A small, fail-closed reader for untrusted PDFs. Given the bytes of a PDF and a p
 
 It does not render, extract text, or decode images. Anything it cannot parse with confidence is reported as a failure (`unparseable`), never guessed at.
 
+Built and maintained by the team behind [Polybot](https://polybotplatform.com), a platform for building virtual assistants that perform tasks, answer questions, and connect to your tools.
+
 ```js
 import { createProbe } from 'pdf-probe'
 
